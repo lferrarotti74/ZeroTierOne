@@ -1,0 +1,25 @@
+/* (c) ZeroTier, Inc.
+ * See LICENSE.txt in nonfree/
+ */
+
+syntax = "proto3";
+
+package pbmessages;
+
+
+
+message MemberStatus {
+    message MemberStatusMetadata {
+        string trace_id = 1;
+        string controller_id = 2; 
+    }
+
+    MemberStatusMetadata metadata = 1;
+    string network_id = 2;
+    string member_id = 3;
+    uint64 timestamp = 4; // Unix timestamp in milliseconds
+    optional string ip_address = 5; // Optional IP address of the member
+    optional string os = 6;
+    optional string arch = 7;
+    optional string version = 8;
+}

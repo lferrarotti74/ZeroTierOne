@@ -1,0 +1,19 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 16af4aa..1eb89f7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ cmake_minimum_required(VERSION 3.5)
+ 
+-file(STRINGS VERSION PVER)
++set(PVER "20120821")
+ 
+ project(natpmp
+         LANGUAGES C
+diff --git a/VERSION b/VERSION
+deleted file mode 100644
+index 2ed7994..0000000
+--- a/VERSION
++++ /dev/null
+@@ -1 +0,0 @@
+-20120821

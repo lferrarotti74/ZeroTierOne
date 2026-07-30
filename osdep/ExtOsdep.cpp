@@ -18,6 +18,8 @@
 
 #define ZT_TAP_BUF_SIZE 16384
 
+#ifdef ZT_EXTOSDEP
+
 namespace ZeroTier {
 
 static int eodFd = -1;
@@ -621,3 +623,5 @@ void ExtOsdepTap::setMtu(unsigned int mtu)
 }
 
 }	// namespace ZeroTier
+
+#endif	 // ZT_EXTOSDEP

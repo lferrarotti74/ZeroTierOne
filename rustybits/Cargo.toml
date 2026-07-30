@@ -1,6 +1,31 @@
-[workspace]
-resolver = "2"
-members = ["smeeclient", "zeroidc"]
+[package]
+name = "rustybits"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = ["zeroidc"]
+zeroidc = []
+
+[dependencies]
+openidconnect = { version = "3.4", default-features = false, features = [
+    "reqwest",
+    "native-tls",
+    "accept-rfc3339-timestamps",
+] }
+base64 = "0.21"
+url = "2.3"
+reqwest = "0.11"
+jwt = { version = "0.16", git = "https://github.com/glimberg/rust-jwt" }
+time = { version = "~0.3", features = ["formatting"] }
+bytes = "1.3"
+thiserror = "1"
+
+[build-dependencies]
+cbindgen = "0.29"
 
 [profile.release]
 strip = "debuginfo"

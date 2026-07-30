@@ -1673,6 +1673,10 @@ static int idtool(int argc, char** argv)
 /* Unix helper functions and signal handlers                                */
 /****************************************************************************/
 
+#ifdef ZT1_CENTRAL_CONTROLLER
+#include <execinfo.h>	// backtrace()/backtrace_symbols_fd() for the controller crash handler
+#endif
+
 #ifdef __UNIX_LIKE__
 static void _sighandlerHup(int sig)
 {
@@ -1690,6 +1694,36 @@ static void _sighandlerQuit(int sig)
 	else
 		exit(0);
 }
+#ifdef ZT1_CENTRAL_CONTROLLER
+// Controller-only fatal-signal handler. The controller otherwise dies silently on a
+// SIGSEGV/SIGABRT/SIGBUS (exit 139/134/135) with nothing in the logs, which makes an
+// intermittent crash nearly impossible to locate. Dump a backtrace to stderr (captured
+// by `kubectl logs`), then re-raise the default handler so the process still terminates
+// with the original signal (preserving the exit code and any core dump).
+//
+// backtrace_symbols_fd() is async-signal-safe (it does not call malloc, unlike
+// backtrace_symbols()). The handler runs on a dedicated alternate stack (SA_ONSTACK) so
+// it can still produce output even on a stack-overflow crash.
+static char _fatalSigAltStack[65536];
+static void _sighandlerFatal(int sig, siginfo_t* info, void*)
+{
+	void* frames[64];
+	const int n = backtrace(frames, 64);
+
+	char hdr[160];
+	const int hlen = snprintf(
+		hdr, sizeof(hdr), "\nFATAL: caught signal %d (si_addr=%p), backtrace (%d frames):\n", sig,
+		(info ? info->si_addr : (void*)0), n);
+	if (hlen > 0)
+		(void)!write(STDERR_FILENO, hdr, (size_t)hlen);
+
+	backtrace_symbols_fd(frames, n, STDERR_FILENO);
+
+	// Re-raise with the default disposition so we exit with the original signal.
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+#endif	// ZT1_CENTRAL_CONTROLLER
 #endif
 
 // Drop privileges on Linux, if supported by libc etc. and "zerotier-one" user exists on system
@@ -2111,6 +2145,28 @@ int main(int argc, char** argv)
 	signal(SIGTERM, &_sighandlerQuit);
 	signal(SIGQUIT, &_sighandlerQuit);
 	signal(SIGINT, &_sighandlerQuit);
+
+#ifdef ZT1_CENTRAL_CONTROLLER
+	// Controller-only: install a backtrace-dumping handler for fatal signals so an
+	// otherwise-silent crash leaves a stack trace in the logs. See _sighandlerFatal.
+	{
+		stack_t ss;
+		ss.ss_sp = _fatalSigAltStack;
+		ss.ss_size = sizeof(_fatalSigAltStack);
+		ss.ss_flags = 0;
+		sigaltstack(&ss, (stack_t*)0);
+
+		struct sigaction fsa = {};
+		fsa.sa_sigaction = &_sighandlerFatal;
+		fsa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
+		sigemptyset(&fsa.sa_mask);
+		sigaction(SIGSEGV, &fsa, (struct sigaction*)0);
+		sigaction(SIGABRT, &fsa, (struct sigaction*)0);
+		sigaction(SIGBUS, &fsa, (struct sigaction*)0);
+		sigaction(SIGFPE, &fsa, (struct sigaction*)0);
+		sigaction(SIGILL, &fsa, (struct sigaction*)0);
+	}
+#endif
 
 #ifdef ZT_EXTOSDEP
 	int extosdepFd1 = -1;

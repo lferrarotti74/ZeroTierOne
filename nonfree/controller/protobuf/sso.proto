@@ -1,0 +1,42 @@
+/* (c) ZeroTier, Inc.
+ * See LICENSE.txt in nonfree/
+ */
+
+syntax = "proto3";
+
+package pbmessages;
+
+message SSOUpdate
+{
+	// Enum for the type of SSO nonce update message
+	enum MessageType {
+		UNKNOWN = 0;
+
+		// From Controller to CV1/CV2 to update nonce information
+		CTL_NONCE_UPDATE = 1;
+
+		// From CV1/CV2 to Controller to update authentication status
+		ZT1_AUTH_UPDATE = 2;
+	}
+
+	message NonceUpdate
+	{
+		string nonce = 1;
+		uint64 nonce_expiration = 2;
+		string network_id = 3;
+		string device_id = 4;
+	}
+
+	message AuthUpdate
+	{
+		string nonce = 1;
+		uint64 authentication_expiry = 2;
+		string network_id = 3;
+		string device_id = 4;
+		string email = 5;
+	}
+
+	MessageType message_type = 1;
+	optional SSOUpdate.NonceUpdate nonce_update = 2;
+	optional SSOUpdate.AuthUpdate auth_update = 3;
+}

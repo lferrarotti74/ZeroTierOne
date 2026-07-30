@@ -110,7 +110,11 @@ class DB {
 	template <typename F> inline void each(F f)
 	{
 		nlohmann::json nullJson;
-		std::unique_lock<std::shared_mutex> lck(_networks_l);
+		// Read-only traversal of _networks: take a shared lock so concurrent readers
+		// (get/hasNetwork/...) aren't blocked for the whole iteration. The callback
+		// must not mutate this DB's _networks (the only caller, DBMirrorSet's sync,
+		// writes to other DBs, not this one).
+		std::shared_lock<std::shared_mutex> lck(_networks_l);
 		for (auto nw = _networks.begin(); nw != _networks.end(); ++nw) {
 			f(nw->first, nw->second->config, 0, nullJson);	 // first provide network with 0 for member ID
 			for (auto m = nw->second->members.begin(); m != nw->second->members.end(); ++m) {
@@ -136,27 +140,45 @@ class DB {
 		_changeListeners.push_back(listener);
 	}
 
+	virtual void _memberChanged(nlohmann::json& old, nlohmann::json& memberConfig, bool notifyListeners);
+	virtual void _networkChanged(nlohmann::json& old, nlohmann::json& networkConfig, bool notifyListeners);
+
   protected:
 	static inline bool _compareRecords(const nlohmann::json& a, const nlohmann::json& b)
 	{
-		if (a.is_object() == b.is_object()) {
-			if (a.is_object()) {
-				if (a.size() != b.size())
-					return false;
-				auto amap = a.get<nlohmann::json::object_t>();
-				auto bmap = b.get<nlohmann::json::object_t>();
-				for (auto ai = amap.begin(); ai != amap.end(); ++ai) {
-					if (ai->first != "revision") {	 // ignore revision, compare only non-revision-counter fields
-						auto bi = bmap.find(ai->first);
-						if ((bi == bmap.end()) || (bi->second != ai->second))
-							return false;
-					}
-				}
-				return true;
-			}
+		if (a.is_object() != b.is_object())
+			return false;
+		if (! a.is_object())
 			return (a == b);
+
+		// Ignore fields that are metadata about the change rather than record state:
+		// "revision" is a monotonic counter, and "change_source" tags which frontend/
+		// controller originated the write.  Neither should make an otherwise-identical
+		// record look modified -- and "change_source" is frequently present on only one
+		// side (a record freshly loaded from the DB carries none), so it can't be handled
+		// by a plain size comparison.
+		auto ignored = [](const std::string& k) { return (k == "revision") || (k == "change_source"); };
+
+		auto amap = a.get<nlohmann::json::object_t>();
+		auto bmap = b.get<nlohmann::json::object_t>();
+
+		size_t aFields = 0;
+		for (auto ai = amap.begin(); ai != amap.end(); ++ai) {
+			if (ignored(ai->first))
+				continue;
+			++aFields;
+			auto bi = bmap.find(ai->first);
+			if ((bi == bmap.end()) || (bi->second != ai->second))
+				return false;
 		}
-		return false;
+
+		// Ensure b has no extra (non-ignored) fields that a lacks.
+		size_t bFields = 0;
+		for (auto bi = bmap.begin(); bi != bmap.end(); ++bi) {
+			if (! ignored(bi->first))
+				++bFields;
+		}
+		return aFields == bFields;
 	}
 
 	struct _Network {
@@ -172,8 +194,6 @@ class DB {
 		std::shared_mutex lock;
 	};
 
-	virtual void _memberChanged(nlohmann::json& old, nlohmann::json& memberConfig, bool notifyListeners);
-	virtual void _networkChanged(nlohmann::json& old, nlohmann::json& networkConfig, bool notifyListeners);
 	void _fillSummaryInfo(const std::shared_ptr<_Network>& nw, NetworkSummaryInfo& info);
 
 	std::vector<DB::ChangeListener*> _changeListeners;

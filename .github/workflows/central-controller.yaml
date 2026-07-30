@@ -1,0 +1,104 @@
+# on:
+#     workflow_dispatch:
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  central_controller:
+    name: Central Controller Build
+    strategy:
+      matrix:
+        runner: [gha-runner-x64, gha-runner-arm64]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+
+      - name: GCP Auth
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.DOCKER_REGISTRY_WRITER}}
+
+      - name: Set up GCloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          # v3 no longer uses the tool cache by default; restore the prior caching
+          # behavior on these self-hosted runners (perf: avoids re-fetching the SDK).
+          cache: true
+
+      - name: Docker Auth
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Get branch name and sanitize
+        id: branch
+        run: |
+          BRANCH_NAME="${GITHUB_REF##*/}"
+          SANITIZED_BRANCH="${BRANCH_NAME//\//-}"
+          echo "branch_name=$SANITIZED_BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Get short git commit SHA
+        id: sha
+        run: |
+          calculatedSha=$(git rev-parse --short ${{ github.sha }})
+          echo "COMMIT_SHORT_SHA=$calculatedSha" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build & Push Docker Image
+        # Registry layer cache (mode=max) so the expensive builder stage -- which
+        # builds opentelemetry-cpp + google-cloud-cpp from source -- is reused across
+        # runs and fresh runners. The cache invalidates automatically when the
+        # bootstrap inputs change. Cache is per-arch (the deps layer is arch-specific).
+        run: |
+          CACHE=us-central1-docker.pkg.dev/zerotier-421eb9/docker-images/ztcentral-controller-buildcache:${{ runner.arch }}
+          docker buildx build \
+            -t us-central1-docker.pkg.dev/zerotier-421eb9/docker-images/ztcentral-controller:${{ env.COMMIT_SHORT_SHA }}-${{ steps.branch.outputs.branch_name }}-${{ runner.arch }} \
+            -f ext/central-controller-docker/Dockerfile \
+            --cache-from type=registry,ref=$CACHE \
+            --cache-to type=registry,ref=$CACHE,mode=max \
+            --provenance false \
+            --push .
+
+  multi-arch-docker:
+    runs-on: gha-runner-x64
+    needs: central_controller
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: GCP Auth
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.DOCKER_REGISTRY_WRITER}}
+
+      - name: Set up GCloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          # v3 no longer uses the tool cache by default; restore the prior caching
+          # behavior on these self-hosted runners (perf: avoids re-fetching the SDK).
+          cache: true
+
+      - name: Docker Auth
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Get branch name and sanitize
+        id: branch
+        run: |
+          BRANCH_NAME="${GITHUB_REF##*/}"
+          SANITIZED_BRANCH="${BRANCH_NAME//\//-}"
+          echo "branch_name=$SANITIZED_BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Get short git commit SHA
+        id: sha
+        run: |
+          calculatedSha=$(git rev-parse --short ${{ github.sha }})
+          echo "COMMIT_SHORT_SHA=$calculatedSha" >> $GITHUB_ENV
+
+      - name: Create and push multi-arch manifest
+        run: |
+          docker manifest create us-central1-docker.pkg.dev/zerotier-421eb9/docker-images/ztcentral-controller:${{ env.COMMIT_SHORT_SHA }}-${{ steps.branch.outputs.branch_name }} \
+            --amend us-central1-docker.pkg.dev/zerotier-421eb9/docker-images/ztcentral-controller:${{ env.COMMIT_SHORT_SHA }}-${{ steps.branch.outputs.branch_name }}-X64 \
+            --amend us-central1-docker.pkg.dev/zerotier-421eb9/docker-images/ztcentral-controller:${{ env.COMMIT_SHORT_SHA }}-${{ steps.branch.outputs.branch_name }}-ARM64
+          docker manifest push us-central1-docker.pkg.dev/zerotier-421eb9/docker-images/ztcentral-controller:${{ env.COMMIT_SHORT_SHA }}-${{ steps.branch.outputs.branch_name }}

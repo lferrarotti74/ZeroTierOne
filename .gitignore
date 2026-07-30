@@ -143,6 +143,11 @@ __pycache__
 *.pyc
 *_source.tar.bz2
 snap/.snapcraft
+build/
 
-# local Claude configurations
+# Local dependency bootstrap output (scripts/bootstrap-deps.sh): the install
+# prefix and the build/clone scratch dir. Large + host-specific; never commit.
+.deps/
+.deps-build/
+
 .claude/*.local.*

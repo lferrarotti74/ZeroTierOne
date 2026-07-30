@@ -14,12 +14,10 @@ DEFS?=
 LDLIBS?=
 DESTDIR?=
 EXTRA_DEPS?=
+ZT_CARGO_FLAGS?=
 
 include objects.mk
 
-ifeq ($(ZT_CONTROLLER),1)
-	ZT_NONFREE=1
-endif
 ifeq ($(ZT_NONFREE),1)
 	include objects-nonfree.mk
 	ONE_OBJS+=$(CONTROLLER_OBJS)
@@ -77,7 +75,6 @@ ifeq ($(ZT_DEBUG),1)
 	override CFLAGS+=-Wall -Wno-deprecated -g -O -pthread $(INCLUDES) $(DEFS)
 	override CXXFLAGS+=-Wall -Wno-deprecated -g -O -std=c++17 -pthread $(INCLUDES) $(DEFS)
 	ZT_TRACE=1
-	ZT_CARGO_FLAGS=
 	# The following line enables optimization for the crypto code, since
 	# C25519 in particular is almost UNUSABLE in -O0 even on a 3ghz box!
 node/Salsa20.o node/SHA512.o node/C25519.o node/Poly1305.o: CXXFLAGS=-Wall -O2 -g -pthread $(INCLUDES) $(DEFS)
@@ -87,7 +84,7 @@ else
 	CXXFLAGS?=-O3 -fstack-protector
 	override CXXFLAGS+=-Wall -Wno-deprecated -std=c++17 -pthread $(INCLUDES) -DNDEBUG $(DEFS)
 	LDFLAGS?=-pie -Wl,-z,relro,-z,now
-	ZT_CARGO_FLAGS=--release
+	ZT_CARGO_FLAGS+=--release
 endif
 
 ifeq ($(ZT_QNAP), 1)
@@ -131,9 +128,6 @@ ifeq ($(CC_MACH),x86_64)
 	override CFLAGS+=-msse -msse2
 	override CXXFLAGS+=-msse -msse2
 	ZT_SSO_SUPPORTED=1
-	ifeq ($(ZT_CONTROLLER),1)
-		EXT_ARCH=amd64
-	endif
 endif
 ifeq ($(CC_MACH),amd64)
 	ZT_ARCHITECTURE=2
@@ -142,9 +136,6 @@ ifeq ($(CC_MACH),amd64)
 	override CFLAGS+=-msse -msse2
 	override CXXFLAGS+=-msse -msse2
 	ZT_SSO_SUPPORTED=1
-	ifeq ($(ZT_CONTROLLER),1)
-		EXT_ARCH=amd64
-	endif
 endif
 ifeq ($(CC_MACH),powerpc64le)
 	ZT_ARCHITECTURE=8
@@ -255,9 +246,6 @@ ifeq ($(CC_MACH),aarch64)
 	ZT_SSO_SUPPORTED=1
 	ZT_USE_X64_ASM_ED25519=0
 	override DEFS+=-DZT_NO_TYPE_PUNNING -DZT_ARCH_ARM_HAS_NEON -march=armv8-a+crypto -mtune=generic -mstrict-align
-	ifeq ($(ZT_CONTROLLER),1)
-		EXT_ARCH=arm64
-	endif
 endif
 ifeq ($(CC_MACH),mipsel)
 	ZT_ARCHITECTURE=5
@@ -311,23 +299,18 @@ ifeq ($(ZT_SSO_SUPPORTED), 1)
 	ifeq ($(ZT_EMBEDDED),)
 		override DEFS+=-DZT_SSO_SUPPORTED=1
 		ifeq ($(ZT_DEBUG),1)
-			LDLIBS+=rustybits/target/debug/libzeroidc.a -ldl -lssl -lcrypto
+			LDLIBS+=rustybits/target/debug/librustybits.a -ldl -lssl -lcrypto
 		else
-			LDLIBS+=rustybits/target/release/libzeroidc.a -ldl -lssl -lcrypto
+			LDLIBS+=rustybits/target/release/librustybits.a -ldl -lssl -lcrypto
 		endif
 	endif
 endif
 
-OTEL_VERSION=1.21.0
-ifeq (${ZT_OTEL},1)
-	OTEL_INSTALL_DIR=ext/opentelemetry-cpp-${OTEL_VERSION}/localinstall
-	override DEFS+=-DZT_OPENTELEMETRY_ENABLED=1
-	INCLUDES+=-I${OTEL_INSTALL_DIR}/include
-	LDLIBS+=-L${OTEL_INSTALL_DIR}/lib -lopentelemetry_exporter_in_memory_metric -lopentelemetry_exporter_in_memory -lopentelemetry_exporter_ostream_logs -lopentelemetry_exporter_ostream_metrics -lopentelemetry_exporter_ostream_span -lopentelemetry_exporter_otlp_grpc  -lopentelemetry_exporter_otlp_grpc_client -lopentelemetry_exporter_otlp_grpc_log -lopentelemetry_exporter_otlp_grpc_metrics -lopentelemetry_otlp_recordable -lopentelemetry_common -lopentelemetry_trace -lopentelemetry_common -lopentelemetry_resources -lopentelemetry_logs -lopentelemetry_metrics -lopentelemetry_proto -lopentelemetry_proto_grpc -lopentelemetry_version -lprotobuf -lgrpc++
-else
-	OTEL_INSTALL_DIR=ext/opentelemetry-cpp-api-only
-	INCLUDES+=-I${OTEL_INSTALL_DIR}/include
-endif
+# OpenTelemetry: the make build uses the header-only API only. The controller is
+# built via CMake (scripts/bootstrap-deps.sh); the make-based controller OTel build
+# was retired.
+OTEL_INSTALL_DIR=ext/opentelemetry-cpp-api-only
+INCLUDES+=-I${OTEL_INSTALL_DIR}/include
 
 # Disable software updates by default on Linux since that is normally done with package management
 override DEFS+=-DZT_BUILD_PLATFORM=1 -DZT_BUILD_ARCHITECTURE=$(ZT_ARCHITECTURE) -DZT_SOFTWARE_UPDATE_DEFAULT="\"disable\""
@@ -345,18 +328,6 @@ endif
 #	CORE_OBJS+=ext/misc/linux-old-glibc-compat.o
 #	override LDFLAGS+=-Wl,--wrap=memcpy -static-libstdc++
 #endif
-
-ifeq ($(ZT_CONTROLLER),1)
-	override CXXFLAGS+=-Wall -Wno-deprecated -std=c++17 -pthread $(INCLUDES) -DNDEBUG $(DEFS)
-	override LDLIBS+=-Lext/libpqxx-7.7.3/install/ubuntu22.04/$(EXT_ARCH)/lib -lpqxx -lpq ext/hiredis-1.0.2/lib/ubuntu22.04/$(EXT_ARCH)/libhiredis.a ext/redis-plus-plus-1.3.3/install/ubuntu22.04/$(EXT_ARCH)/lib/libredis++.a -lssl -lcrypto
-	override DEFS+=-DZT_CONTROLLER_USE_LIBPQ -DZT_NO_PEER_METRICS -DZT_OPENTELEMETRY_ENABLED
-	override INCLUDES+=-I/usr/include/postgresql -Iext/libpqxx-7.7.3/install/ubuntu22.04/$(EXT_ARCH)/include -Iext/hiredis-1.0.2/include/ -Iext/redis-plus-plus-1.3.3/install/ubuntu22.04/$(EXT_ARCH)/include/sw/
-	ifeq ($(ZT_DEBUG),1)
-		override LDLIBS+=rustybits/target/debug/libsmeeclient.a
-	else
-		override LDLIBS+=rustybits/target/release/libsmeeclient.a
-	endif
-endif
 
 # ARM32 hell -- use conservative CFLAGS
 ifeq ($(ZT_ARCHITECTURE),3)
@@ -415,7 +386,7 @@ zerotier-idtool: zerotier-one
 zerotier-cli: zerotier-one
 	ln -sf zerotier-one zerotier-cli
 
-$(ONE_OBJS): zeroidc smeeclient
+$(ONE_OBJS): zeroidc rustybits
 
 libzerotiercore.a:	FORCE
 	make CFLAGS="-O3 -fstack-protector -fPIC" CXXFLAGS="-O3 -std=c++17 -fstack-protector -fPIC" $(CORE_OBJS)
@@ -434,19 +405,13 @@ manpages:	FORCE
 
 doc:	manpages
 
-ifeq (${ZT_OTEL},1)
 otel:
-	cd ext/opentelemetry-cpp-1.21.0 && mkdir -p localinstall && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$(shell pwd)/ext/opentelemetry-cpp-1.21.0/localinstall -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_TESTING=OFF -DOPENTELEMETRY_INSTALL=ON -DWITH_BENCHMARK=OFF -DWITH_EXAMPLES=OFF -DWITH_FUNC_TESTS=OFF -DUSE_THIRDPARTY_LIBRARIES=ON -DWITH_OTLP_GRPC=ON -DWITH_OTLP_HTTP=OFF -DWITH_PROMETHEUS=OFF
-	cd ext/opentelemetry-cpp-1.21.0/build && make -j4 install
-else
-otel:
-	@echo "OpenTelemetry exporter not enabled, skipping build."
-endif
+	@echo "OpenTelemetry API headers are vendored (ext/opentelemetry-cpp-api-only); nothing to build."
 
 ext/${OTEL_INSTALL_DIR}/include/opentelemetry/version.h: otel
 
 clean: FORCE
-	rm -rf *.a *.so *.o node/*.o nonfree/controller/*.o osdep/*.o service/*.o ext/http-parser/*.o ext/miniupnpc/*.o ext/libnatpmp/*.o $(CORE_OBJS) $(ONE_OBJS) zerotier-one zerotier-idtool zerotier-cli zerotier-selftest build-* ZeroTierOneInstaller-* *.deb *.rpm .depend debian/files debian/zerotier-one*.debhelper debian/zerotier-one.substvars debian/*.log debian/zerotier-one doc/node_modules ext/misc/*.o debian/.debhelper debian/debhelper-build-stamp docker/zerotier-one rustybits/target ext/opentelemetry-cpp-${OTEL_VERSION}/localinstall ext/opentelemetry-cpp-${OTEL_VERSION}/build
+	rm -rf *.a *.so *.o node/*.o nonfree/controller/*.o osdep/*.o service/*.o ext/http-parser/*.o ext/miniupnpc/*.o ext/libnatpmp/*.o $(CORE_OBJS) $(ONE_OBJS) zerotier-one zerotier-idtool zerotier-cli zerotier-selftest build-* ZeroTierOneInstaller-* *.deb *.rpm .depend debian/files debian/zerotier-one*.debhelper debian/zerotier-one.substvars debian/*.log debian/zerotier-one doc/node_modules ext/misc/*.o debian/.debhelper debian/debhelper-build-stamp docker/zerotier-one rustybits/target
 
 distclean:	clean
 
@@ -458,20 +423,6 @@ official:	FORCE
 docker:	FORCE
 	docker build --no-cache -f ext/installfiles/linux/zerotier-containerized/Dockerfile -t zerotier-containerized .
 
-_buildx:
-	@echo "docker buildx create"
-	# docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-	docker run --privileged --rm tonistiigi/binfmt --install all
-	@echo docker buildx create --name multiarch --driver docker-container --use
-	@echo docker buildx inspect --bootstrap
-
-central-controller:	FORCE
-	make ZT_OTEL=1 otel && ZT_OTEL=1 make -j4 ZT_CONTROLLER=1  one
-
-central-controller-docker: _buildx FORCE
-	docker buildx build --platform linux/amd64,linux/arm64 --no-cache -t registry.zerotier.com/zerotier-central/ztcentral-controller:${TIMESTAMP} -f ext/central-controller-docker/Dockerfile --build-arg git_branch=`git name-rev --name-only HEAD` . --push
-	@echo Image: registry.zerotier.com/zerotier-central/ztcentral-controller:${TIMESTAMP}
-
 debug:	FORCE
 	make ZT_DEBUG=1 one
 	make ZT_DEBUG=1 selftest
@@ -479,17 +430,10 @@ debug:	FORCE
 ifeq ($(ZT_SSO_SUPPORTED), 1)
 ifeq ($(ZT_EMBEDDED),)
 zeroidc:	FORCE
-	export PATH=/${HOME}/.cargo/bin:$$PATH; cd rustybits && cargo build $(ZT_CARGO_FLAGS) -p zeroidc
+	export PATH=/${HOME}/.cargo/bin:$$PATH; cd rustybits && cargo build $(ZT_CARGO_FLAGS)
 endif
 else
 zeroidc:
-endif
-
-ifeq ($(ZT_CONTROLLER), 1)
-smeeclient:	FORCE
-	export PATH=/${HOME}/.cargo/bin:$$PATH; cd rustybits && cargo build $(ZT_CARGO_FLAGS) -p smeeclient
-else
-smeeclient:
 endif
 
 # Note: keep the symlinks in /var/lib/zerotier-one to the binaries since these

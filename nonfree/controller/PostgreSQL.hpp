@@ -8,9 +8,12 @@
 #define ZT_CONTROLLER_POSTGRESQL_HPP
 
 #include "ConnectionPool.hpp"
+#include "CtlUtil.hpp"
 #include "DB.hpp"
+#include "NotificationListener.hpp"
 #include "opentelemetry/trace/provider.h"
 
+#include <atomic>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <pqxx/pqxx>
@@ -25,6 +28,14 @@ class PostgresConnection : public Connection {
   public:
 	virtual ~PostgresConnection()
 	{
+	}
+
+	// A pqxx::connection whose backend has gone away (server restart, AlloyDB
+	// maintenance, network drop) reports is_open() == false and cannot be reused
+	// -- pqxx 7 has no reconnect.  Returning false here makes the pool drop it.
+	virtual bool alive() const override
+	{
+		return c && c->is_open();
 	}
 
 	std::shared_ptr<pqxx::connection> c;
@@ -51,15 +62,13 @@ class PostgresConnFactory : public ConnectionFactory {
 
 template <typename T> class MemberNotificationReceiver : public pqxx::notification_receiver {
   public:
-	MemberNotificationReceiver(T* p, pqxx::connection& c, const std::string& channel) : pqxx::notification_receiver(c, channel), _psql(p)
-	{
-		fprintf(stderr, "initialize MemberNotificationReceiver\n");
-	}
+	MemberNotificationReceiver(T* p, pqxx::connection& c, const std::string& channel)
+		: pqxx::notification_receiver(c, channel)
+		, _psql(p)
+	{ ZTC_LOG("initialize MemberNotificationReceiver\n"); }
 
 	virtual ~MemberNotificationReceiver()
-	{
-		fprintf(stderr, "MemberNotificationReceiver destroyed\n");
-	}
+	{ ZTC_LOG("MemberNotificationReceiver destroyed\n"); }
 
 	virtual void operator()(const std::string& payload, int backendPid)
 	{
@@ -70,7 +79,7 @@ template <typename T> class MemberNotificationReceiver : public pqxx::notificati
 		span->SetAttribute("payload", payload);
 		span->SetAttribute("psqlReady", _psql->isReady());
 
-		fprintf(stderr, "Member Notification received: %s\n", payload.c_str());
+		ZTC_LOG("Member Notification received: %s\n", payload.c_str());
 		Metrics::pgsql_mem_notification++;
 		nlohmann::json tmp(nlohmann::json::parse(payload));
 		nlohmann::json& ov = tmp["old_val"];
@@ -83,13 +92,13 @@ template <typename T> class MemberNotificationReceiver : public pqxx::notificati
 
 		if (oldConfig.is_object() && newConfig.is_object()) {
 			_psql->save(newConfig, _psql->isReady());
-			fprintf(stderr, "payload sent\n");
+			ZTC_LOG("payload sent\n");
 		}
 		else if (newConfig.is_object() && ! oldConfig.is_object()) {
 			// new member
 			Metrics::member_count++;
 			_psql->save(newConfig, _psql->isReady());
-			fprintf(stderr, "new member payload sent\n");
+			ZTC_LOG("new member payload sent\n");
 		}
 		else if (! newConfig.is_object() && oldConfig.is_object()) {
 			// member delete
@@ -97,7 +106,7 @@ template <typename T> class MemberNotificationReceiver : public pqxx::notificati
 			uint64_t memberId = OSUtils::jsonIntHex(oldConfig["id"], 0ULL);
 			if (memberId && networkId) {
 				_psql->eraseMember(networkId, memberId);
-				fprintf(stderr, "member delete payload sent\n");
+				ZTC_LOG("member delete payload sent\n");
 			}
 		}
 	}
@@ -108,15 +117,13 @@ template <typename T> class MemberNotificationReceiver : public pqxx::notificati
 
 template <typename T> class NetworkNotificationReceiver : public pqxx::notification_receiver {
   public:
-	NetworkNotificationReceiver(T* p, pqxx::connection& c, const std::string& channel) : pqxx::notification_receiver(c, channel), _psql(p)
-	{
-		fprintf(stderr, "initialize NetworkrNotificationReceiver\n");
-	}
+	NetworkNotificationReceiver(T* p, pqxx::connection& c, const std::string& channel)
+		: pqxx::notification_receiver(c, channel)
+		, _psql(p)
+	{ ZTC_LOG("initialize NetworkrNotificationReceiver\n"); }
 
 	virtual ~NetworkNotificationReceiver()
-	{
-		fprintf(stderr, "NetworkNotificationReceiver destroyed\n");
-	};
+	{ ZTC_LOG("NetworkNotificationReceiver destroyed\n"); };
 
 	virtual void operator()(const std::string& payload, int packend_pid)
 	{
@@ -127,7 +134,7 @@ template <typename T> class NetworkNotificationReceiver : public pqxx::notificat
 		span->SetAttribute("payload", payload);
 		span->SetAttribute("psqlReady", _psql->isReady());
 
-		fprintf(stderr, "Network Notification received: %s\n", payload.c_str());
+		ZTC_LOG("Network Notification received: %s\n", payload.c_str());
 		Metrics::pgsql_net_notification++;
 		nlohmann::json tmp(nlohmann::json::parse(payload));
 
@@ -145,7 +152,7 @@ template <typename T> class NetworkNotificationReceiver : public pqxx::notificat
 			span->SetAttribute("action", "network_change");
 			span->SetAttribute("network_id", nwid);
 			_psql->save(newConfig, _psql->isReady());
-			fprintf(stderr, "payload sent\n");
+			ZTC_LOG("payload sent\n");
 		}
 		else if (newConfig.is_object() && ! oldConfig.is_object()) {
 			std::string nwid = newConfig["id"];
@@ -153,7 +160,7 @@ template <typename T> class NetworkNotificationReceiver : public pqxx::notificat
 			span->SetAttribute("action", "new_network");
 			// new network
 			_psql->save(newConfig, _psql->isReady());
-			fprintf(stderr, "new network payload sent\n");
+			ZTC_LOG("new network payload sent\n");
 		}
 		else if (! newConfig.is_object() && oldConfig.is_object()) {
 			// network delete
@@ -164,7 +171,7 @@ template <typename T> class NetworkNotificationReceiver : public pqxx::notificat
 			span->SetAttribute("network_id_int", networkId);
 			if (networkId) {
 				_psql->eraseNetwork(networkId);
-				fprintf(stderr, "network delete payload sent\n");
+				ZTC_LOG("network delete payload sent\n");
 			}
 		}
 	}
@@ -177,6 +184,92 @@ struct NodeOnlineRecord {
 	uint64_t lastSeen;
 	InetAddress physicalAddress;
 	std::string osArch;
+	std::string version;
+};
+
+/**
+ * internal class for listening to PostgreSQL notification channels.
+ */
+template <typename T> class _notificationReceiver : public pqxx::notification_receiver {
+  public:
+	_notificationReceiver(T* p, pqxx::connection& c, const std::string& channel)
+		: pqxx::notification_receiver(c, channel)
+		, _listener(p)
+	{ ZTC_LOG("initialize PostgresMemberNotificationListener::_notificationReceiver\n"); }
+
+	virtual void operator()(const std::string& payload, int backendPid)
+	{
+		auto provider = opentelemetry::trace::Provider::GetTracerProvider();
+		auto tracer = provider->GetTracer("notification_receiver");
+		auto span = tracer->StartSpan("notification_receiver::operator()");
+		auto scope = tracer->WithActiveSpan(span);
+		_listener->onNotification(payload);
+	}
+
+  private:
+	T* _listener;
+};
+
+class PostgresMemberListener : public NotificationListener {
+  public:
+	PostgresMemberListener(
+		DB* db,
+		std::shared_ptr<ConnectionPool<PostgresConnection> > pool,
+		const std::string& channel,
+		uint64_t timeout);
+	virtual ~PostgresMemberListener();
+
+	virtual void listen();
+
+	virtual NotificationResult onNotification(const std::string& payload) override;
+
+	// Stop and join the listen thread so no further onNotification callbacks fire.
+	// Idempotent; the destructor also calls it as a safety net.
+	void stop() override;
+
+  private:
+	// Drop the dead connection/receiver and rebind to a freshly borrowed one.
+	void reconnect();
+
+	std::atomic<bool> _run { false };
+	DB* _db;
+	std::shared_ptr<ConnectionPool<PostgresConnection> > _pool;
+	std::shared_ptr<PostgresConnection> _conn;
+	uint64_t _notification_timeout;
+	std::thread _listenerThread;
+	std::string _channel;
+	_notificationReceiver<PostgresMemberListener>* _receiver = nullptr;
+};
+
+class PostgresNetworkListener : public NotificationListener {
+  public:
+	PostgresNetworkListener(
+		DB* db,
+		std::shared_ptr<ConnectionPool<PostgresConnection> > pool,
+		const std::string& channel,
+		uint64_t timeout);
+	virtual ~PostgresNetworkListener();
+
+	virtual void listen();
+
+	virtual NotificationResult onNotification(const std::string& payload) override;
+
+	// Stop and join the listen thread so no further onNotification callbacks fire.
+	// Idempotent; the destructor also calls it as a safety net.
+	void stop() override;
+
+  private:
+	// Drop the dead connection/receiver and rebind to a freshly borrowed one.
+	void reconnect();
+
+	std::atomic<bool> _run { false };
+	DB* _db;
+	std::shared_ptr<ConnectionPool<PostgresConnection> > _pool;
+	std::shared_ptr<PostgresConnection> _conn;
+	uint64_t _notification_timeout;
+	std::thread _listenerThread;
+	std::string _channel;
+	_notificationReceiver<PostgresNetworkListener>* _receiver = nullptr;
 };
 
 }	// namespace ZeroTier

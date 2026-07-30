@@ -5,6 +5,7 @@
 #include "DB.hpp"
 
 #include "../../node/Metrics.hpp"
+#include "CtlUtil.hpp"
 #include "EmbeddedNetworkController.hpp"
 #include "opentelemetry/trace/provider.h"
 
@@ -51,7 +52,7 @@ void DB::initNetwork(nlohmann::json& network)
 		network["mtu"] = ZT_DEFAULT_MTU;
 	if (! network.count("remoteTraceTarget"))
 		network["remoteTraceTarget"] = nlohmann::json();
-	if (! network.count("removeTraceLevel"))
+	if (! network.count("remoteTraceLevel"))
 		network["remoteTraceLevel"] = 0;
 	if (! network.count("rulesSource"))
 		network["rulesSource"] = "";
@@ -67,6 +68,14 @@ void DB::initNetwork(nlohmann::json& network)
 		network["clientId"] = "";
 	if (! network.count("authorizationEndpoint"))
 		network["authorizationEndpoint"] = "";
+	if (! network.count("ssoConfig")) {
+		network["ssoConfig"] = nlohmann::json::object();
+		network["ssoConfig"]["ssoClientId"] = "";
+		network["ssoConfig"]["ssoLinkedId"] = "";
+		network["ssoConfig"]["ssoAuthorizationEndpoint"] = nullptr;
+		network["ssoConfig"]["ssoIssuer"] = "";
+		network["ssoConfig"]["ssoProvider"] = "";
+	}
 
 	network["objtype"] = "network";
 }
@@ -116,7 +125,7 @@ void DB::initMember(nlohmann::json& member)
 		member["vProto"] = -1;
 	if (! member.count("remoteTraceTarget"))
 		member["remoteTraceTarget"] = nlohmann::json();
-	if (! member.count("removeTraceLevel"))
+	if (! member.count("remoteTraceLevel"))
 		member["remoteTraceLevel"] = 0;
 	member["objtype"] = "member";
 }
@@ -164,7 +173,8 @@ bool DB::get(const uint64_t networkId, nlohmann::json& network)
 	auto tracer = provider->GetTracer("db");
 	auto span = tracer->StartSpan("db::getNetwork");
 	auto scope = tracer->WithActiveSpan(span);
-	char networkIdStr[17];
+	char networkIdStr[32];
+	memset(networkIdStr, 0, sizeof(networkIdStr));
 	span->SetAttribute("network_id", Utils::hex(networkId, networkIdStr));
 
 	waitForReady();
@@ -190,8 +200,10 @@ bool DB::get(const uint64_t networkId, nlohmann::json& network, const uint64_t m
 	auto tracer = provider->GetTracer("db");
 	auto span = tracer->StartSpan("db::getNetworkAndMember");
 	auto scope = tracer->WithActiveSpan(span);
-	char networkIdStr[17];
-	char memberIdStr[11];
+	char networkIdStr[32];
+	memset(networkIdStr, 0, sizeof(networkIdStr));
+	char memberIdStr[32];
+	memset(memberIdStr, 0, sizeof(memberIdStr));
 	span->SetAttribute("network_id", Utils::hex(networkId, networkIdStr));
 	span->SetAttribute("member_id", Utils::hex(networkId, memberIdStr));
 
@@ -216,14 +228,21 @@ bool DB::get(const uint64_t networkId, nlohmann::json& network, const uint64_t m
 	return true;
 }
 
-bool DB::get(const uint64_t networkId, nlohmann::json& network, const uint64_t memberId, nlohmann::json& member, NetworkSummaryInfo& info)
+bool DB::get(
+	const uint64_t networkId,
+	nlohmann::json& network,
+	const uint64_t memberId,
+	nlohmann::json& member,
+	NetworkSummaryInfo& info)
 {
 	auto provider = opentelemetry::trace::Provider::GetTracerProvider();
 	auto tracer = provider->GetTracer("db");
 	auto span = tracer->StartSpan("db::getNetworkAndMemberAndSummary");
 	auto scope = tracer->WithActiveSpan(span);
-	char networkIdStr[17];
-	char memberIdStr[11];
+	char networkIdStr[32];
+	memset(networkIdStr, 0, sizeof(networkIdStr));
+	char memberIdStr[32];
+	memset(memberIdStr, 0, sizeof(memberIdStr));
 	span->SetAttribute("network_id", Utils::hex(networkId, networkIdStr));
 	span->SetAttribute("member_id", Utils::hex(memberId, memberIdStr));
 
@@ -256,7 +275,8 @@ bool DB::get(const uint64_t networkId, nlohmann::json& network, std::vector<nloh
 	auto tracer = provider->GetTracer("db");
 	auto span = tracer->StartSpan("db::getNetworkAndMembers");
 	auto scope = tracer->WithActiveSpan(span);
-	char networkIdStr[17];
+	char networkIdStr[32];
+	memset(networkIdStr, 0, sizeof(networkIdStr));
 	span->SetAttribute("network_id", Utils::hex(networkId, networkIdStr));
 
 	waitForReady();
@@ -500,15 +520,21 @@ void DB::_networkChanged(nlohmann::json& old, nlohmann::json& networkConfig, boo
 				this->get(networkId, network, members);
 				for (auto i = members.begin(); i != members.end(); ++i) {
 					const std::string nodeID = (*i)["id"];
+					fprintf(
+						stderr, "Deauthorizing member %s on network %s due to network deletion\n", nodeID.c_str(),
+						ids.c_str());
 					const uint64_t memberId = Utils::hexStrToU64(nodeID.c_str());
 					std::unique_lock<std::shared_mutex> ll(_changeListeners_l);
 					for (auto j = _changeListeners.begin(); j != _changeListeners.end(); ++j) {
+						fprintf(
+							stderr, "Notifying listener of deauthorization of %s on %s\n", nodeID.c_str(), ids.c_str());
 						(*j)->onNetworkMemberDeauthorize(this, networkId, memberId);
 					}
 				}
 			}
 			catch (std::exception& e) {
-				std::cerr << "Error deauthorizing members on network delete: " << e.what() << std::endl;
+				std::cerr << ::ZeroTier::controllerLogId()
+						  << " Error deauthorizing members on network delete: " << e.what() << std::endl;
 			}
 
 			// delete the network

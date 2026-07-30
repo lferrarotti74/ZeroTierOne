@@ -1,2 +1,12 @@
 .git/
 workspace/
+# Local from-source dependency builds (scripts/bootstrap-deps.sh) and CMake output;
+# never ship these into an image -- they are host-specific and large.
+.deps/
+.deps-build/
+build/
+build-*/
+out/
+# Dockerfiles are supplied via -f; keeping them out of the context means editing
+# them does not invalidate the COPY layers (and the heavy build cache).
+ext/central-controller-docker/Dockerfile*

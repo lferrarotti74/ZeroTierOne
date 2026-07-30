@@ -23,7 +23,7 @@
     </None>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="target\zeroidc.h">
+    <ClInclude Include="target\rustybits.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

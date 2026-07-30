@@ -42,9 +42,17 @@
 #include "../version.h"
 #include "OneService.hpp"
 
+#ifdef CMAKE_BUILD
+#include <httplib.h>
+#else
 #include <cpp-httplib/httplib.h>
+#endif
 
 #ifdef ZT_OPENTELEMETRY_ENABLED
+#include "opentelemetry/baggage/propagation/baggage_propagator.h"
+#include "opentelemetry/context/propagation/composite_propagator.h"
+#include "opentelemetry/context/propagation/global_propagator.h"
+#include "opentelemetry/context/propagation/text_map_propagator.h"
 #include "opentelemetry/exporters/memory/in_memory_data.h"
 #include "opentelemetry/exporters/otlp/otlp_grpc_exporter.h"
 #include "opentelemetry/exporters/otlp/otlp_grpc_log_record_exporter.h"
@@ -64,6 +72,7 @@
 #include "opentelemetry/sdk/trace/tracer.h"
 #include "opentelemetry/sdk/trace/tracer_context.h"
 #include "opentelemetry/sdk/trace/tracer_provider.h"
+#include "opentelemetry/trace/propagation/http_trace_context.h"
 #include "opentelemetry/trace/provider.h"
 
 namespace sdktrace = opentelemetry::v1::sdk::trace;
@@ -77,7 +86,7 @@ namespace sdkresource = opentelemetry::v1::sdk::resource;
 #endif
 
 #if ZT_SSO_ENABLED
-#include <zeroidc.h>
+#include <rustybits.h>
 #endif
 
 #ifdef __WINDOWS__
@@ -126,6 +135,10 @@ using json = nlohmann::json;
 #include "../nonfree/controller/EmbeddedNetworkController.hpp"
 #include "../nonfree/controller/PostgreSQL.hpp"
 #include "../nonfree/controller/Redis.hpp"
+#ifdef ZT1_CENTRAL_CONTROLLER
+#include "../nonfree/controller/CentralDB.hpp"
+#include "../nonfree/controller/ControllerConfig.hpp"
+#endif
 #include "../osdep/EthernetTap.hpp"
 #ifdef __WINDOWS__
 #include "../osdep/WindowsEthernetTap.hpp"
@@ -279,7 +292,8 @@ std::string http_log(const httplib::Request& req, const httplib::Response& res)
 	std::string query;
 	for (auto it = req.params.begin(); it != req.params.end(); ++it) {
 		const auto& x = *it;
-		snprintf(buf, sizeof(buf), "%c%s=%s", (it == req.params.begin()) ? '?' : '&', x.first.c_str(), x.second.c_str());
+		snprintf(
+			buf, sizeof(buf), "%c%s=%s", (it == req.params.begin()) ? '?' : '&', x.first.c_str(), x.second.c_str());
 		query += buf;
 	}
 	snprintf(buf, sizeof(buf), "%s\n", query.c_str());
@@ -329,8 +343,8 @@ class NetworkState {
 
 #if ZT_SSO_ENABLED
 		if (_idc) {
-			zeroidc::zeroidc_stop(_idc);
-			zeroidc::zeroidc_delete(_idc);
+			rustybits::zeroidc_stop(_idc);
+			rustybits::zeroidc_delete(_idc);
 			_idc = nullptr;
 		}
 #endif
@@ -428,7 +442,8 @@ class NetworkState {
 				assert(_config.centralAuthURL != nullptr);
 				assert(_config.ssoProvider != nullptr);
 
-				_idc = zeroidc::zeroidc_new(_config.issuerURL, _config.ssoClientID, _config.centralAuthURL, _config.ssoProvider, _webPort);
+				_idc = rustybits::zeroidc_new(
+					_config.issuerURL, _config.ssoClientID, _config.centralAuthURL, _config.ssoProvider, _webPort);
 
 				if (_idc == nullptr) {
 					fprintf(stderr, "idc is null\n");
@@ -436,15 +451,15 @@ class NetworkState {
 				}
 			}
 
-			zeroidc::zeroidc_set_nonce_and_csrf(_idc, _config.ssoState, _config.ssoNonce);
+			rustybits::zeroidc_set_nonce_and_csrf(_idc, _config.ssoState, _config.ssoNonce);
 
-			char* url = zeroidc::zeroidc_get_auth_url(_idc);
+			char* url = rustybits::zeroidc_get_auth_url(_idc);
 			memcpy(_config.authenticationURL, url, strlen(url));
 			_config.authenticationURL[strlen(url)] = 0;
-			zeroidc::free_cstr(url);
+			rustybits::free_cstr(url);
 
-			if (zeroidc::zeroidc_is_running(_idc) && nwc->status == ZT_NETWORK_STATUS_AUTHENTICATION_REQUIRED) {
-				zeroidc::zeroidc_kick_refresh_thread(_idc);
+			if (rustybits::zeroidc_is_running(_idc) && nwc->status == ZT_NETWORK_STATUS_AUTHENTICATION_REQUIRED) {
+				rustybits::zeroidc_kick_refresh_thread(_idc);
 			}
 #endif
 		}
@@ -474,13 +489,13 @@ class NetworkState {
 			return ret;
 		}
 
-		ret = zeroidc::zeroidc_token_exchange(_idc, code);
-		zeroidc::zeroidc_set_nonce_and_csrf(_idc, _config.ssoState, _config.ssoNonce);
+		ret = rustybits::zeroidc_token_exchange(_idc, code);
+		rustybits::zeroidc_set_nonce_and_csrf(_idc, _config.ssoState, _config.ssoNonce);
 
-		char* url = zeroidc::zeroidc_get_auth_url(_idc);
+		char* url = rustybits::zeroidc_get_auth_url(_idc);
 		memcpy(_config.authenticationURL, url, strlen(url));
 		_config.authenticationURL[strlen(url)] = 0;
-		zeroidc::free_cstr(url);
+		rustybits::free_cstr(url);
 #endif
 		return ret;
 	}
@@ -492,7 +507,7 @@ class NetworkState {
 			fprintf(stderr, "idc is null\n");
 			return 0;
 		}
-		return zeroidc::zeroidc_get_exp_time(_idc);
+		return rustybits::zeroidc_get_exp_time(_idc);
 #else
 		return 0;
 #endif
@@ -506,7 +521,7 @@ class NetworkState {
 	std::map<InetAddress, SharedPtr<ManagedRoute> > _managedRoutes;
 	OneService::NetworkSettings _settings;
 #if ZT_SSO_ENABLED
-	zeroidc::ZeroIDC* _idc;
+	rustybits::ZeroIDC* _idc;
 #endif
 };
 
@@ -515,9 +530,15 @@ namespace {
 static const InetAddress NULL_INET_ADDR;
 
 // Fake TLS hello for TCP tunnel outgoing connections (TUNNELED mode)
-static const char ZT_TCP_TUNNEL_HELLO[9] = {
-	0x17, 0x03, 0x03, 0x00, 0x04, (char)ZEROTIER_ONE_VERSION_MAJOR, (char)ZEROTIER_ONE_VERSION_MINOR, (char)((ZEROTIER_ONE_VERSION_REVISION >> 8) & 0xff), (char)(ZEROTIER_ONE_VERSION_REVISION & 0xff)
-};
+static const char ZT_TCP_TUNNEL_HELLO[9] = { 0x17,
+											 0x03,
+											 0x03,
+											 0x00,
+											 0x04,
+											 (char)ZEROTIER_ONE_VERSION_MAJOR,
+											 (char)ZEROTIER_ONE_VERSION_MINOR,
+											 (char)((ZEROTIER_ONE_VERSION_REVISION >> 8) & 0xff),
+											 (char)(ZEROTIER_ONE_VERSION_REVISION & 0xff) };
 
 static std::string _trimString(const std::string& s)
 {
@@ -581,14 +602,9 @@ static void _networkToJson(nlohmann::json& nj, NetworkState& ns)
 	nj["id"] = tmp;
 	nj["nwid"] = tmp;
 	OSUtils::ztsnprintf(
-		tmp,
-		sizeof(tmp),
-		"%.2x:%.2x:%.2x:%.2x:%.2x:%.2x",
-		(unsigned int)((ns.config().mac >> 40) & 0xff),
-		(unsigned int)((ns.config().mac >> 32) & 0xff),
-		(unsigned int)((ns.config().mac >> 24) & 0xff),
-		(unsigned int)((ns.config().mac >> 16) & 0xff),
-		(unsigned int)((ns.config().mac >> 8) & 0xff),
+		tmp, sizeof(tmp), "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x", (unsigned int)((ns.config().mac >> 40) & 0xff),
+		(unsigned int)((ns.config().mac >> 32) & 0xff), (unsigned int)((ns.config().mac >> 24) & 0xff),
+		(unsigned int)((ns.config().mac >> 16) & 0xff), (unsigned int)((ns.config().mac >> 8) & 0xff),
 		(unsigned int)(ns.config().mac & 0xff));
 	nj["mac"] = tmp;
 	nj["name"] = ns.config().name;
@@ -756,15 +772,76 @@ static void _moonToJson(nlohmann::json& mj, const World& world)
 
 class OneServiceImpl;
 
-static int SnodeVirtualNetworkConfigFunction(ZT_Node* node, void* uptr, void* tptr, uint64_t nwid, void** nuptr, enum ZT_VirtualNetworkConfigOperation op, const ZT_VirtualNetworkConfig* nwconf);
+static int SnodeVirtualNetworkConfigFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	uint64_t nwid,
+	void** nuptr,
+	enum ZT_VirtualNetworkConfigOperation op,
+	const ZT_VirtualNetworkConfig* nwconf);
 static void SnodeEventCallback(ZT_Node* node, void* uptr, void* tptr, enum ZT_Event event, const void* metaData);
-static void SnodeStatePutFunction(ZT_Node* node, void* uptr, void* tptr, enum ZT_StateObjectType type, const uint64_t id[2], const void* data, int len);
-static int SnodeStateGetFunction(ZT_Node* node, void* uptr, void* tptr, enum ZT_StateObjectType type, const uint64_t id[2], void* data, unsigned int maxlen);
-static int SnodeWirePacketSendFunction(ZT_Node* node, void* uptr, void* tptr, int64_t localSocket, const struct sockaddr_storage* addr, const void* data, unsigned int len, unsigned int ttl);
-static void SnodeVirtualNetworkFrameFunction(ZT_Node* node, void* uptr, void* tptr, uint64_t nwid, void** nuptr, uint64_t sourceMac, uint64_t destMac, unsigned int etherType, unsigned int vlanId, const void* data, unsigned int len);
-static int SnodePathCheckFunction(ZT_Node* node, void* uptr, void* tptr, uint64_t ztaddr, int64_t localSocket, const struct sockaddr_storage* remoteAddr);
-static int SnodePathLookupFunction(ZT_Node* node, void* uptr, void* tptr, uint64_t ztaddr, int family, struct sockaddr_storage* result);
-static void StapFrameHandler(void* uptr, void* tptr, uint64_t nwid, const MAC& from, const MAC& to, unsigned int etherType, unsigned int vlanId, const void* data, unsigned int len);
+static void SnodeStatePutFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	enum ZT_StateObjectType type,
+	const uint64_t id[2],
+	const void* data,
+	int len);
+static int SnodeStateGetFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	enum ZT_StateObjectType type,
+	const uint64_t id[2],
+	void* data,
+	unsigned int maxlen);
+static int SnodeWirePacketSendFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	int64_t localSocket,
+	const struct sockaddr_storage* addr,
+	const void* data,
+	unsigned int len,
+	unsigned int ttl);
+static void SnodeVirtualNetworkFrameFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	uint64_t nwid,
+	void** nuptr,
+	uint64_t sourceMac,
+	uint64_t destMac,
+	unsigned int etherType,
+	unsigned int vlanId,
+	const void* data,
+	unsigned int len);
+static int SnodePathCheckFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	uint64_t ztaddr,
+	int64_t localSocket,
+	const struct sockaddr_storage* remoteAddr);
+static int SnodePathLookupFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	uint64_t ztaddr,
+	int family,
+	struct sockaddr_storage* result);
+static void StapFrameHandler(
+	void* uptr,
+	void* tptr,
+	uint64_t nwid,
+	const MAC& from,
+	const MAC& to,
+	unsigned int etherType,
+	unsigned int vlanId,
+	const void* data,
+	unsigned int len);
 
 static int ShttpOnMessageBegin(http_parser* parser);
 static int ShttpOnUrl(http_parser* parser, const char* ptr, size_t length);
@@ -780,9 +857,15 @@ static int ShttpOnBody(http_parser* parser, const char* ptr, size_t length);
 static int ShttpOnMessageComplete(http_parser* parser);
 
 #if (HTTP_PARSER_VERSION_MAJOR >= 2) && (HTTP_PARSER_VERSION_MINOR >= 1)
-static const struct http_parser_settings HTTP_PARSER_SETTINGS = { ShttpOnMessageBegin, ShttpOnUrl, ShttpOnStatus, ShttpOnHeaderField, ShttpOnValue, ShttpOnHeadersComplete, ShttpOnBody, ShttpOnMessageComplete };
+static const struct http_parser_settings HTTP_PARSER_SETTINGS = { ShttpOnMessageBegin, ShttpOnUrl,
+																  ShttpOnStatus,	   ShttpOnHeaderField,
+																  ShttpOnValue,		   ShttpOnHeadersComplete,
+																  ShttpOnBody,		   ShttpOnMessageComplete };
 #else
-static const struct http_parser_settings HTTP_PARSER_SETTINGS = { ShttpOnMessageBegin, ShttpOnUrl, ShttpOnHeaderField, ShttpOnValue, ShttpOnHeadersComplete, ShttpOnBody, ShttpOnMessageComplete };
+static const struct http_parser_settings HTTP_PARSER_SETTINGS = { ShttpOnMessageBegin,	  ShttpOnUrl,
+																  ShttpOnHeaderField,	  ShttpOnValue,
+																  ShttpOnHeadersComplete, ShttpOnBody,
+																  ShttpOnMessageComplete };
 #endif
 
 /**
@@ -946,6 +1029,10 @@ class OneServiceImpl : public OneService {
 	double _exporterSampleRate;
 #endif
 
+#ifdef ZT1_CENTRAL_CONTROLLER
+	ControllerConfig _controllerConfig;
+#endif
+
 	// end member variables ----------------------------------------------------
 
 	OneServiceImpl(const char* hp, unsigned int port)
@@ -992,6 +1079,9 @@ class OneServiceImpl : public OneService {
 		, _traceProvider(nullptr)
 		, _exporterEndpoint()
 		, _exporterSampleRate(1.0)
+#endif
+#ifdef ZT1_CENTRAL_CONTROLLER
+		, _controllerConfig()
 #endif
 	{
 		_ports[0] = 0;
@@ -1042,7 +1132,9 @@ class OneServiceImpl : public OneService {
 #ifdef ZT_USE_MINIUPNPC
 		delete _portMapper;
 #endif
+#ifdef ZT_NONFREE_CONTROLLER
 		delete _controller;
+#endif
 		delete _rc;
 	}
 
@@ -1058,29 +1150,53 @@ class OneServiceImpl : public OneService {
 	void initTracing()
 	{
 		if (! _exporterEndpoint.empty() && _exporterSampleRate > 0.0) {
-			fprintf(stderr, "OpenTelemetry tracing enabled with endpoint %s and sample rate %.2f\n", _exporterEndpoint.c_str(), _exporterSampleRate);
+			fprintf(
+				stderr, "OpenTelemetry tracing enabled with endpoint %s and sample rate %.2f\n",
+				_exporterEndpoint.c_str(), _exporterSampleRate);
 			// Set up OpenTelemetry exporter and tracer provider
 			opentelemetry::v1::exporter::otlp::OtlpGrpcExporterOptions opts;
 			opts.endpoint = _exporterEndpoint + "/v1/traces";
-			auto exporter = std::unique_ptr<opentelemetry::exporter::otlp::OtlpGrpcExporter>(new opentelemetry::exporter::otlp::OtlpGrpcExporter(opts));
+			auto exporter = std::unique_ptr<opentelemetry::exporter::otlp::OtlpGrpcExporter>(
+				new opentelemetry::exporter::otlp::OtlpGrpcExporter(opts));
 
 			sdktrace::BatchSpanProcessorOptions batch_options {};
 			batch_options.schedule_delay_millis = std::chrono::milliseconds(5000);	 // 5 seconds
 
-			auto processor = std::unique_ptr<sdktrace::SpanProcessor>(new sdktrace::BatchSpanProcessor(std::move(exporter), batch_options));
+			auto processor = std::unique_ptr<sdktrace::SpanProcessor>(
+				new sdktrace::BatchSpanProcessor(std::move(exporter), batch_options));
 			auto processors = std::vector<std::unique_ptr<sdktrace::SpanProcessor> >();
 			processors.push_back(std::move(processor));
 
 			char buf[256];
 			auto versionString = std::stringstream();
-			versionString << ZEROTIER_ONE_VERSION_MAJOR << "." << ZEROTIER_ONE_VERSION_MINOR << "." << ZEROTIER_ONE_VERSION_REVISION;
-			auto resource_attributes = sdkresource::ResourceAttributes { { "service.version", versionString.str() }, { "service.node_id", _node->identity().address().toString(buf) }, { "service.namespace", "com.zerotier.zerotier-one" } };
+			versionString << ZEROTIER_ONE_VERSION_MAJOR << "." << ZEROTIER_ONE_VERSION_MINOR << "."
+						  << ZEROTIER_ONE_VERSION_REVISION;
+			auto resource_attributes =
+				sdkresource::ResourceAttributes { { "service.version", versionString.str() },
+												  { "service.node_id", _node->identity().address().toString(buf) },
+												  { "service.namespace", "com.zerotier.zerotier-one" } };
 			auto resource = sdkresource::Resource::Create(resource_attributes);
 
-			auto sampler = std::unique_ptr<sdktrace::Sampler>(new sdktrace::TraceIdRatioBasedSampler(_exporterSampleRate));
-			auto tracer_context = std::make_unique<sdktrace::TracerContext>(std::move(processors), resource, std::move(sampler));
-			_traceProvider = opentelemetry::nostd::shared_ptr<sdktrace::TracerProvider>(new sdktrace::TracerProvider(std::move(tracer_context)));
+			auto sampler =
+				std::unique_ptr<sdktrace::Sampler>(new sdktrace::TraceIdRatioBasedSampler(_exporterSampleRate));
+			auto tracer_context =
+				std::make_unique<sdktrace::TracerContext>(std::move(processors), resource, std::move(sampler));
+			_traceProvider = opentelemetry::nostd::shared_ptr<sdktrace::TracerProvider>(
+				new sdktrace::TracerProvider(std::move(tracer_context)));
 			sdktrace::Provider::SetTracerProvider(_traceProvider);
+
+			std::vector<std::unique_ptr<opentelemetry::context::propagation::TextMapPropagator> > propagators;
+			propagators.push_back(
+				std::unique_ptr<opentelemetry::context::propagation::TextMapPropagator>(
+					new opentelemetry::trace::propagation::HttpTraceContext()));
+			propagators.push_back(
+				std::unique_ptr<opentelemetry::context::propagation::TextMapPropagator>(
+					new opentelemetry::baggage::propagation::BaggagePropagator()));
+
+			auto p = opentelemetry::nostd::shared_ptr<opentelemetry::context::propagation::TextMapPropagator>(
+				new opentelemetry::context::propagation::CompositePropagator(std::move(propagators)));
+
+			opentelemetry::context::propagation::GlobalTextMapPropagator::SetGlobalPropagator(p);
 		}
 	}
 
@@ -1090,10 +1206,12 @@ class OneServiceImpl : public OneService {
 			// Set up OpenTelemetry metrics exporter
 			// opentelemetry::exporter::otlp::OtlpGrpcExporterOptions opts;
 			// opts.endpoint = _exporterEndpoint + "/v1/metrics";
-			// auto exporter = std::unique_ptr<opentelemetry::exporter::otlp::OtlpGrpcExporter>(new opentelemetry::exporter::otlp::OtlpGrpcExporter(opts));
-			// auto processor = std::unique_ptr<sdkmetrics::MetricReader>(new sdkmetrics::PeriodicExportingMetricReader(std::move(exporter)));
-			// auto meter_provider = opentelemetry::v1::nostd::shared_ptr<sdkmetrics::MeterProvider>(new sdkmetrics::MeterProvider(std::move(processor)));
-			// sdkmetrics::Provider::SetMeterProvider(meter_provider);
+			// auto exporter = std::unique_ptr<opentelemetry::exporter::otlp::OtlpGrpcExporter>(new
+			// opentelemetry::exporter::otlp::OtlpGrpcExporter(opts)); auto processor =
+			// std::unique_ptr<sdkmetrics::MetricReader>(new
+			// sdkmetrics::PeriodicExportingMetricReader(std::move(exporter))); auto meter_provider =
+			// opentelemetry::v1::nostd::shared_ptr<sdkmetrics::MeterProvider>(new
+			// sdkmetrics::MeterProvider(std::move(processor))); sdkmetrics::Provider::SetMeterProvider(meter_provider);
 		}
 	}
 
@@ -1103,9 +1221,12 @@ class OneServiceImpl : public OneService {
 			// Set up OpenTelemetry logging exporter
 			// opentelemetry::exporter::otlp::OtlpGrpcExporterOptions opts;
 			// opts.endpoint = _exporterEndpoint + "/v1/logs";
-			// auto exporter = std::unique_ptr<opentelemetry::exporter::otlp::OtlpGrpcExporter>(new opentelemetry::exporter::otlp::OtlpGrpcExporter(opts));
-			// auto processor = std::unique_ptr<opentelemetry::v1::sdk::logs::LogRecordProcessor>(new opentelemetry::v1::sdk::logs::SimpleLogRecordProcessor(std::move(exporter)));
-			// auto logger_provider = opentelemetry::nostd::shared_ptr<opentelemetry::v1::sdk::logs::LoggerProvider>(new opentelemetry::v1::sdk::logs::LoggerProvider(std::move(processor)));
+			// auto exporter = std::unique_ptr<opentelemetry::exporter::otlp::OtlpGrpcExporter>(new
+			// opentelemetry::exporter::otlp::OtlpGrpcExporter(opts)); auto processor =
+			// std::unique_ptr<opentelemetry::v1::sdk::logs::LogRecordProcessor>(new
+			// opentelemetry::v1::sdk::logs::SimpleLogRecordProcessor(std::move(exporter))); auto logger_provider =
+			// opentelemetry::nostd::shared_ptr<opentelemetry::v1::sdk::logs::LoggerProvider>(new
+			// opentelemetry::v1::sdk::logs::LoggerProvider(std::move(processor)));
 			// opentelemetry::logs::Provider::SetLoggerProvider(logger_provider);
 		}
 	}
@@ -1125,7 +1246,8 @@ class OneServiceImpl : public OneService {
 					if (! OSUtils::writeFile(authTokenPath.c_str(), _authToken)) {
 						Mutex::Lock _l(_termReason_m);
 						_termReason = ONE_UNRECOVERABLE_ERROR;
-						_fatalErrorMessage = "authtoken.secret could not be written (try running with -U to prevent dropping of privileges)";
+						_fatalErrorMessage = "authtoken.secret could not be written (try running with -U to prevent "
+											 "dropping of privileges)";
 						return _termReason;
 					}
 					else {
@@ -1146,7 +1268,8 @@ class OneServiceImpl : public OneService {
 					if (! OSUtils::writeFile(metricsTokenPath.c_str(), _metricsToken)) {
 						Mutex::Lock _l(_termReason_m);
 						_termReason = ONE_UNRECOVERABLE_ERROR;
-						_fatalErrorMessage = "metricstoken.secret could not be written (try running with -U to prevent dropping of privileges)";
+						_fatalErrorMessage = "metricstoken.secret could not be written (try running with -U to prevent "
+											 "dropping of privileges)";
 						return _termReason;
 					}
 					else {
@@ -1206,7 +1329,8 @@ class OneServiceImpl : public OneService {
 			if (_ports[0] == 0) {
 				Mutex::Lock _l(_termReason_m);
 				_termReason = ONE_UNRECOVERABLE_ERROR;
-				_fatalErrorMessage = std::string("cannot bind to local control interface port ") + std::to_string(_configuredPort);
+				_fatalErrorMessage =
+					std::string("cannot bind to local control interface port ") + std::to_string(_configuredPort);
 				return _termReason;
 			}
 
@@ -1248,7 +1372,8 @@ class OneServiceImpl : public OneService {
 
 				if (_ports[2]) {
 					char uniqueName[64];
-					OSUtils::ztsnprintf(uniqueName, sizeof(uniqueName), "ZeroTier/%.10llx@%u", static_cast<unsigned long long>(_node->address()), _ports[2]);
+					OSUtils::ztsnprintf(
+						uniqueName, sizeof(uniqueName), "ZeroTier/%.10llx@%u", _node->address(), _ports[2]);
 					_portMapper = new PortMapper(_ports[2], uniqueName);
 				}
 			}
@@ -1266,9 +1391,15 @@ class OneServiceImpl : public OneService {
 			// Delete legacy iddb.d if present (cleanup)
 			OSUtils::rmDashRf((_homePath + ZT_PATH_SEPARATOR_S "iddb.d").c_str());
 
-			// Network controller is now enabled by default for desktop and server
+			// Network controller is now disabled by default for desktop and server
 #ifdef ZT_NONFREE_CONTROLLER
-			_controller = new EmbeddedNetworkController(_node, _homePath.c_str(), _controllerDbPath.c_str(), _ports[0], _rc);
+#ifdef ZT1_CENTRAL_CONTROLLER
+			_controller = new EmbeddedNetworkController(
+				_node, _homePath.c_str(), _controllerDbPath.c_str(), _ports[0], &_controllerConfig);
+#else
+			_controller =
+				new EmbeddedNetworkController(_node, _homePath.c_str(), _controllerDbPath.c_str(), _ports[0], _rc);
+#endif
 			if (! _ssoRedirectURL.empty()) {
 				_controller->setSSORedirectURL(_ssoRedirectURL);
 			}
@@ -1279,7 +1410,8 @@ class OneServiceImpl : public OneService {
 
 			// Join existing networks in networks.d
 			{
-				std::vector<std::string> networksDotD(OSUtils::listDirectory((_homePath + ZT_PATH_SEPARATOR_S "networks.d").c_str()));
+				std::vector<std::string> networksDotD(
+					OSUtils::listDirectory((_homePath + ZT_PATH_SEPARATOR_S "networks.d").c_str()));
 				for (std::vector<std::string>::iterator f(networksDotD.begin()); f != networksDotD.end(); ++f) {
 					std::size_t dot = f->find_last_of('.');
 					if ((dot == 16) && (f->substr(16) == ".conf"))
@@ -1289,7 +1421,8 @@ class OneServiceImpl : public OneService {
 
 			// Orbit existing moons in moons.d
 			{
-				std::vector<std::string> moonsDotD(OSUtils::listDirectory((_homePath + ZT_PATH_SEPARATOR_S "moons.d").c_str()));
+				std::vector<std::string> moonsDotD(
+					OSUtils::listDirectory((_homePath + ZT_PATH_SEPARATOR_S "moons.d").c_str()));
 				for (std::vector<std::string>::iterator f(moonsDotD.begin()); f != moonsDotD.end(); ++f) {
 					std::size_t dot = f->find_last_of('.');
 					if ((dot == 16) && (f->substr(16) == ".moon"))
@@ -1342,8 +1475,11 @@ class OneServiceImpl : public OneService {
 					}
 				}
 
-				// Refresh bindings in case device's interfaces have changed, and also sync routes to update any shadow routes (e.g. shadow default)
-				if (((now - lastBindRefresh) >= (_node->bondController()->inUse() ? ZT_BINDER_REFRESH_PERIOD / 4 : ZT_BINDER_REFRESH_PERIOD)) || restarted) {
+				// Refresh bindings in case device's interfaces have changed, and also sync routes to update any shadow
+				// routes (e.g. shadow default)
+				if (((now - lastBindRefresh)
+					 >= (_node->bondController()->inUse() ? ZT_BINDER_REFRESH_PERIOD / 4 : ZT_BINDER_REFRESH_PERIOD))
+					|| restarted) {
 					// If secondary port is not configured to a constant value and we've been offline for a while,
 					// bind a new secondary port. This is a workaround for a "coma" issue caused by buggy NATs that stop
 					// working on one port after a while.
@@ -1379,7 +1515,8 @@ class OneServiceImpl : public OneService {
 #ifdef ZT_USE_MINIUPNPC
 					if (_portMapper) {
 						std::vector<InetAddress> mappedAddresses(_portMapper->get());
-						for (std::vector<InetAddress>::const_iterator ext(mappedAddresses.begin()); ext != mappedAddresses.end(); ++ext)
+						for (std::vector<InetAddress>::const_iterator ext(mappedAddresses.begin());
+							 ext != mappedAddresses.end(); ++ext)
 							_node->addLocalInterfaceAddress(reinterpret_cast<const struct sockaddr_storage*>(&(*ext)));
 					}
 #endif
@@ -1405,28 +1542,42 @@ class OneServiceImpl : public OneService {
 				}
 
 				// Close TCP fallback tunnel if we have direct UDP
-				if (! _forceTcpRelay && (_tcpFallbackTunnel) && ((now - _lastDirectReceiveFromGlobal) < (ZT_TCP_FALLBACK_AFTER / 2))) {
+				if (! _forceTcpRelay && (_tcpFallbackTunnel)
+					&& ((now - _lastDirectReceiveFromGlobal) < (ZT_TCP_FALLBACK_AFTER / 2))) {
 					_phy.close(_tcpFallbackTunnel->sock);
 				}
 
 				// Sync multicast group memberships
 				if ((now - lastTapMulticastGroupCheck) >= ZT_TAP_CHECK_MULTICAST_INTERVAL) {
 					lastTapMulticastGroupCheck = now;
-					std::vector<std::pair<uint64_t, std::pair<std::vector<MulticastGroup>, std::vector<MulticastGroup> > > > mgChanges;
+					std::vector<
+						std::pair<uint64_t, std::pair<std::vector<MulticastGroup>, std::vector<MulticastGroup> > > >
+						mgChanges;
 					{
 						Mutex::Lock _l(_nets_m);
 						mgChanges.reserve(_nets.size() + 1);
 						for (std::map<uint64_t, NetworkState>::const_iterator n(_nets.begin()); n != _nets.end(); ++n) {
 							if (n->second.tap()) {
-								mgChanges.push_back(std::pair<uint64_t, std::pair<std::vector<MulticastGroup>, std::vector<MulticastGroup> > >(n->first, std::pair<std::vector<MulticastGroup>, std::vector<MulticastGroup> >()));
-								n->second.tap()->scanMulticastGroups(mgChanges.back().second.first, mgChanges.back().second.second);
+								mgChanges.push_back(
+									std::pair<
+										uint64_t,
+										std::pair<std::vector<MulticastGroup>, std::vector<MulticastGroup> > >(
+										n->first,
+										std::pair<std::vector<MulticastGroup>, std::vector<MulticastGroup> >()));
+								n->second.tap()->scanMulticastGroups(
+									mgChanges.back().second.first, mgChanges.back().second.second);
 							}
 						}
 					}
-					for (std::vector<std::pair<uint64_t, std::pair<std::vector<MulticastGroup>, std::vector<MulticastGroup> > > >::iterator c(mgChanges.begin()); c != mgChanges.end(); ++c) {
-						for (std::vector<MulticastGroup>::iterator m(c->second.first.begin()); m != c->second.first.end(); ++m)
+					for (std::vector<std::pair<
+							 uint64_t, std::pair<std::vector<MulticastGroup>, std::vector<MulticastGroup> > > >::
+							 iterator c(mgChanges.begin());
+						 c != mgChanges.end(); ++c) {
+						for (std::vector<MulticastGroup>::iterator m(c->second.first.begin());
+							 m != c->second.first.end(); ++m)
 							_node->multicastSubscribe((void*)0, c->first, m->mac().toInt(), m->adi());
-						for (std::vector<MulticastGroup>::iterator m(c->second.second.begin()); m != c->second.second.end(); ++m)
+						for (std::vector<MulticastGroup>::iterator m(c->second.second.begin());
+							 m != c->second.second.end(); ++m)
 							_node->multicastUnsubscribe(c->first, m->mac().toInt(), m->adi());
 					}
 				}
@@ -1434,7 +1585,9 @@ class OneServiceImpl : public OneService {
 				// Clean peers.d periodically
 				if ((now - lastCleanedPeersDb) >= 3600000) {
 					lastCleanedPeersDb = now;
-					OSUtils::cleanDirectory((_homePath + ZT_PATH_SEPARATOR_S "peers.d").c_str(), now - 2592000000LL);	// delete older than 30 days
+					OSUtils::cleanDirectory(
+						(_homePath + ZT_PATH_SEPARATOR_S "peers.d").c_str(),
+						now - 2592000000LL);   // delete older than 30 days
 				}
 
 				const unsigned long delay = (dl > now) ? (unsigned long)(dl - now) : 500;
@@ -1468,7 +1621,9 @@ class OneServiceImpl : public OneService {
 					break;
 				}
 				case ZT_EXCEPTION_INVALID_IDENTITY: {
-					_fatalErrorMessage = "invalid identity loaded from disk. Please remove identity.public and identity.secret from " + _homePath + " and try again";
+					_fatalErrorMessage =
+						"invalid identity loaded from disk. Please remove identity.public and identity.secret from "
+						+ _homePath + " and try again";
 					break;
 				}
 				case ZT_EXCEPTION_INVALID_SERIALIZED_DATA_INVALID_TYPE: {
@@ -1526,14 +1681,17 @@ class OneServiceImpl : public OneService {
 		// LEGACY: support old "trustedpaths" flat file
 		FILE* trustpaths = fopen((_homePath + ZT_PATH_SEPARATOR_S "trustedpaths").c_str(), "r");
 		if (trustpaths) {
-			fprintf(stderr, "WARNING: 'trustedpaths' flat file format is deprecated in favor of path definitions in local.conf" ZT_EOL_S);
+			fprintf(
+				stderr, "WARNING: 'trustedpaths' flat file format is deprecated in favor of path definitions in "
+						"local.conf" ZT_EOL_S);
 			char buf[1024];
 			while (fgets(buf, sizeof(buf), trustpaths)) {
 				int fno = 0;
 				char* saveptr = (char*)0;
 				uint64_t trustedPathId = 0;
 				InetAddress trustedPathNetwork;
-				for (char* f = Utils::stok(buf, "=\r\n \t", &saveptr); (f); f = Utils::stok((char*)0, "=\r\n \t", &saveptr)) {
+				for (char* f = Utils::stok(buf, "=\r\n \t", &saveptr); (f);
+					 f = Utils::stok((char*)0, "=\r\n \t", &saveptr)) {
 					if (fno == 0) {
 						trustedPathId = Utils::hexStrToU64(f);
 					}
@@ -1544,7 +1702,9 @@ class OneServiceImpl : public OneService {
 						break;
 					++fno;
 				}
-				if ((trustedPathId != 0) && ((trustedPathNetwork.ss_family == AF_INET) || (trustedPathNetwork.ss_family == AF_INET6)) && (trustedPathNetwork.netmaskBits() > 0)) {
+				if ((trustedPathId != 0)
+					&& ((trustedPathNetwork.ss_family == AF_INET) || (trustedPathNetwork.ss_family == AF_INET6))
+					&& (trustedPathNetwork.netmaskBits() > 0)) {
 					ppc[trustedPathNetwork].trustedPathId = trustedPathId;
 					ppc[trustedPathNetwork].mtu = 0;   // use default
 				}
@@ -1560,7 +1720,8 @@ class OneServiceImpl : public OneService {
 				try {
 					_localConfig = OSUtils::jsonParse(lcbuf);
 					if (! _localConfig.is_object()) {
-						fprintf(stderr, "ERROR: unable to parse local.conf (root element is not a JSON object)" ZT_EOL_S);
+						fprintf(
+							stderr, "ERROR: unable to parse local.conf (root element is not a JSON object)" ZT_EOL_S);
 						exit(1);
 					}
 				}
@@ -1619,17 +1780,21 @@ class OneServiceImpl : public OneService {
 				_exporterEndpoint = OSUtils::jsonString(otel["exporterEndpoint"], "");
 				_exporterSampleRate = OSUtils::jsonDouble(otel["exporterSampleRate"], 1.0f);
 				if (_exporterEndpoint.empty()) {
-					fprintf(stderr, "WARNING: OpenTelemetry exporter endpoint is not set. Traces will not be exported." ZT_EOL_S);
+					fprintf(
+						stderr,
+						"WARNING: OpenTelemetry exporter endpoint is not set. Traces will not be exported." ZT_EOL_S);
 				}
 				if (_exporterSampleRate <= 0.0) {
-					fprintf(stderr, "WARNING: OpenTelemetry exporter sample rate is not set or invalid. Traces will not be exported." ZT_EOL_S);
+					fprintf(
+						stderr, "WARNING: OpenTelemetry exporter sample rate is not set or invalid. Traces will not be "
+								"exported." ZT_EOL_S);
 				}
 			}
 			else {
-				fprintf(stderr, "WARNING: OpenTelemetry exporter settings are not set. Traces will not be exported." ZT_EOL_S);
+				fprintf(
+					stderr,
+					"WARNING: OpenTelemetry exporter settings are not set. Traces will not be exported." ZT_EOL_S);
 			}
-#else
-			fprintf(stderr, "WARNING: OpenTelemetry support is not enabled. Traces will not be exported." ZT_EOL_S);
 #endif
 
 			// Bind to wildcard instead of to specific interfaces (disables full tunnel capability)
@@ -1649,8 +1814,119 @@ class OneServiceImpl : public OneService {
 		// Set trusted paths if there are any
 		if (! ppc.empty()) {
 			for (std::map<InetAddress, ZT_PhysicalPathConfiguration>::iterator i(ppc.begin()); i != ppc.end(); ++i)
-				_node->setPhysicalPathConfiguration(reinterpret_cast<const struct sockaddr_storage*>(&(i->first)), &(i->second));
+				_node->setPhysicalPathConfiguration(
+					reinterpret_cast<const struct sockaddr_storage*>(&(i->first)), &(i->second));
 		}
+
+#ifdef ZT1_CENTRAL_CONTROLLER
+		// Central Controller Mode Settings
+		json& cc = lc["controller"];
+		if (cc.is_object()) {
+			_controllerConfig.listenMode = OSUtils::jsonString(cc["listenMode"], "pgsql");
+			_controllerConfig.statusMode = OSUtils::jsonString(cc["statusMode"], "pgsql");
+			// Valid values must match CHECK constraint in migration 0007_assigned_version
+			{
+				const std::string av = OSUtils::jsonString(cc["assignedCentralVersion"], "all");
+				if (av != "cv1" && av != "cv2" && av != "all") {
+					fprintf(
+						stderr,
+						"ERROR: assignedCentralVersion must be one of 'cv1', 'cv2', or 'all'" ZT_EOL_S);
+					exit(1);
+				}
+				_controllerConfig.assignedCentralVersion = av;
+			}
+
+			_controllerConfig.ssoEnabled = OSUtils::jsonBool(cc["ssoEnabled"], false);
+
+			// Central SSO redirect URLs keyed by frontend. Networks are routed to the
+			// SSO endpoint of the Central version ("cv1" or "cv2") they belong to.
+			if (cc["ssoRedirectURLs"].is_object()) {
+				json& urls = cc["ssoRedirectURLs"];
+				for (json::iterator i(urls.begin()); i != urls.end(); ++i) {
+					if ((i.key() != "cv1") && (i.key() != "cv2")) {
+						fprintf(stderr, "ERROR: ssoRedirectURLs keys must be one of 'cv1' or 'cv2'" ZT_EOL_S);
+						exit(1);
+					}
+					_controllerConfig.ssoRedirectURLs[i.key()] = OSUtils::jsonString(i.value(), "");
+				}
+			}
+			if (_controllerConfig.ssoEnabled) {
+				const std::string& av = _controllerConfig.assignedCentralVersion;
+				const char* required[2] = { "cv1", "cv2" };
+				for (int i = 0; i < 2; ++i) {
+					if ((av != "all") && (av != required[i])) {
+						continue;
+					}
+					auto it = _controllerConfig.ssoRedirectURLs.find(required[i]);
+					if ((it == _controllerConfig.ssoRedirectURLs.end()) || it->second.empty()) {
+						fprintf(
+							stderr,
+							"ERROR: controller.ssoRedirectURLs must contain a non-empty '%s' entry when ssoEnabled "
+							"is true" ZT_EOL_S,
+							required[i]);
+						exit(1);
+					}
+				}
+			}
+
+			// redis settings
+			if (cc["redis"].is_object() && _rc == NULL) {
+				json& redis = cc["redis"];
+				_rc = new RedisConfig;
+				_rc->hostname = OSUtils::jsonString(redis["hostname"], "");
+				_rc->port = OSUtils::jsonInt(redis["port"], 6379);
+				_rc->password = OSUtils::jsonString(redis["password"], "");
+				_rc->clusterMode = OSUtils::jsonBool(redis["clusterMode"], false);
+				_controllerConfig.redisConfig = _rc;
+			}
+			else if (cc["redis"].is_object() && _rc != NULL) {
+				_controllerConfig.redisConfig = _rc;
+			}
+			if ((_controllerConfig.listenMode == "redis" || _controllerConfig.statusMode == "redis")
+				&& ! _controllerConfig.redisConfig) {
+				fprintf(
+					stderr,
+					"ERROR: redis listenMode or statusMode requires redis configuration in local.conf" ZT_EOL_S);
+				exit(1);
+			}
+
+			// pubsub settings
+			if (cc["pubsub"].is_object()) {
+				json& ps = cc["pubsub"];
+				_controllerConfig.pubSubConfig = new PubSubConfig();
+				_controllerConfig.pubSubConfig->project_id = OSUtils::jsonString(ps["project_id"], "");
+				_controllerConfig.pubSubConfig->member_change_recv_topic =
+					OSUtils::jsonString(ps["member_change_recv_topic"], "");
+				_controllerConfig.pubSubConfig->member_change_send_topic =
+					OSUtils::jsonString(ps["member_change_send_topic"], "");
+				_controllerConfig.pubSubConfig->network_change_recv_topic =
+					OSUtils::jsonString(ps["network_change_recv_topic"], "");
+				_controllerConfig.pubSubConfig->network_change_send_topic =
+					OSUtils::jsonString(ps["network_change_send_topic"], "");
+				_controllerConfig.pubSubConfig->sso_nonce_publish_topic =
+					OSUtils::jsonString(ps["sso_nonce_publish_topic"], "");
+				_controllerConfig.pubSubConfig->sso_auth_subscribe_topic =
+					OSUtils::jsonString(ps["sso_auth_subscribe_topic"], "");
+			}
+			if (_controllerConfig.listenMode == "pubsub" && ! _controllerConfig.pubSubConfig) {
+				fprintf(stderr, "ERROR: pubsub listenMode requires pubsub configuration in local.conf" ZT_EOL_S);
+				exit(1);
+			}
+
+			// bigtable settings
+			if (cc["bigtable"].is_object()) {
+				json& bt = cc["bigtable"];
+				_controllerConfig.bigTableConfig = new BigTableConfig();
+				_controllerConfig.bigTableConfig->project_id = OSUtils::jsonString(bt["project_id"], "");
+				_controllerConfig.bigTableConfig->instance_id = OSUtils::jsonString(bt["instance_id"], "");
+				_controllerConfig.bigTableConfig->table_id = OSUtils::jsonString(bt["table_id"], "");
+			}
+			if (_controllerConfig.listenMode == "bigtable" && ! _controllerConfig.bigTableConfig) {
+				fprintf(stderr, "ERROR: bigtable listenMode requires bigtable configuration in local.conf" ZT_EOL_S);
+				exit(1);
+			}
+		}
+#endif
 	}
 
 	virtual ReasonForTermination reasonForTermination() const
@@ -1720,7 +1996,8 @@ class OneServiceImpl : public OneService {
 	virtual bool setNetworkSettings(const uint64_t nwid, const NetworkSettings& settings)
 	{
 		char nlcpath[4096];
-		OSUtils::ztsnprintf(nlcpath, sizeof(nlcpath), "%s" ZT_PATH_SEPARATOR_S "%.16llx.local.conf", _networksPath.c_str(), static_cast<unsigned long long>(nwid));
+		OSUtils::ztsnprintf(
+			nlcpath, sizeof(nlcpath), "%s" ZT_PATH_SEPARATOR_S "%.16llx.local.conf", _networksPath.c_str(), nwid);
 		FILE* out = fopen(nlcpath, "w");
 		if (out) {
 			fprintf(out, "allowManaged=%d\n", (int)settings.allowManaged);
@@ -1752,7 +2029,7 @@ class OneServiceImpl : public OneService {
 		std::string statusPath = "/status";
 		std::string metricsPath = "/metrics";
 
-		
+
 
 		std::vector<std::string> noAuthEndpoints { "/sso", "/health" };
 
@@ -1786,15 +2063,22 @@ class OneServiceImpl : public OneService {
 			auto ret = _controlPlane.set_mount_point(appUiPath, appUiDir);
 			_controlPlaneV6.set_mount_point(appUiPath, appUiDir);
 			if (! ret) {
-				fprintf(stderr, "Mounting app directory failed. Creating it. Path: %s - Dir: %s\n", appUiPath.c_str(), appUiDir);
+				fprintf(
+					stderr, "Mounting app directory failed. Creating it. Path: %s - Dir: %s\n", appUiPath.c_str(),
+					appUiDir);
 				if (! OSUtils::mkdir(appUiDir)) {
-					fprintf(stderr, "Could not create app directory either. Path: %s - Dir: %s\n", appUiPath.c_str(), appUiDir);
+					fprintf(
+						stderr, "Could not create app directory either. Path: %s - Dir: %s\n", appUiPath.c_str(),
+						appUiDir);
 				}
 				else {
 					ret = _controlPlane.set_mount_point(appUiPath, appUiDir);
 					_controlPlaneV6.set_mount_point(appUiPath, appUiDir);
 					if (! ret) {
-						fprintf(stderr, "Really could not create and mount directory. Path: %s - Dir: %s\nWeb apps won't work.\n", appUiPath.c_str(), appUiDir);
+						fprintf(
+							stderr,
+							"Really could not create and mount directory. Path: %s - Dir: %s\nWeb apps won't work.\n",
+							appUiPath.c_str(), appUiDir);
 					}
 				}
 			}
@@ -1807,8 +2091,10 @@ class OneServiceImpl : public OneService {
 					auto match = req.matches[1];
 					if (match.matched) {
 						// fallback
-						char indexHtmlPath[sizeof(appUiDir) + ZT_MAX_PATH + 13];
-						snprintf(indexHtmlPath, sizeof(indexHtmlPath), "%s/%s/%s", appUiDir, match.str().c_str(), "index.html");
+						char indexHtmlPath[16384];
+						snprintf(
+							indexHtmlPath, sizeof(indexHtmlPath), "%s/%s/%s", appUiDir, match.str().c_str(),
+							"index.html");
 						// fprintf(stderr, "fallback path %s\n", indexHtmlPath);
 
 						std::string indexHtml;
@@ -2058,7 +2344,10 @@ class OneServiceImpl : public OneService {
 				res.status = 400;
 				return;
 			}
-			res.status = _node->bondController()->setAllMtuByTuple(mtu, req.matches[2].str().c_str(), req.matches[3].str().c_str()) ? 200 : 400;
+			res.status = _node->bondController()->setAllMtuByTuple(
+							 mtu, req.matches[2].str().c_str(), req.matches[3].str().c_str())
+							 ? 200
+							 : 400;
 			if (res.status == 400) {
 				setContent(req, res, "Unable to find specified link");
 				return;
@@ -2132,7 +2421,9 @@ class OneServiceImpl : public OneService {
 			out["versionMinor"] = ZEROTIER_ONE_VERSION_MINOR;
 			out["versionRev"] = ZEROTIER_ONE_VERSION_REVISION;
 			out["versionBuild"] = ZEROTIER_ONE_VERSION_BUILD;
-			OSUtils::ztsnprintf(tmp, sizeof(tmp), "%d.%d.%d", ZEROTIER_ONE_VERSION_MAJOR, ZEROTIER_ONE_VERSION_MINOR, ZEROTIER_ONE_VERSION_REVISION);
+			OSUtils::ztsnprintf(
+				tmp, sizeof(tmp), "%d.%d.%d", ZEROTIER_ONE_VERSION_MAJOR, ZEROTIER_ONE_VERSION_MINOR,
+				ZEROTIER_ONE_VERSION_REVISION);
 			out["version"] = tmp;
 			out["clock"] = OSUtils::now();
 
@@ -2445,7 +2736,9 @@ class OneServiceImpl : public OneService {
 			out["versionMinor"] = ZEROTIER_ONE_VERSION_MINOR;
 			out["versionRev"] = ZEROTIER_ONE_VERSION_REVISION;
 			out["versionBuild"] = ZEROTIER_ONE_VERSION_BUILD;
-			OSUtils::ztsnprintf(tmp, sizeof(tmp), "%d.%d.%d", ZEROTIER_ONE_VERSION_MAJOR, ZEROTIER_ONE_VERSION_MINOR, ZEROTIER_ONE_VERSION_REVISION);
+			OSUtils::ztsnprintf(
+				tmp, sizeof(tmp), "%d.%d.%d", ZEROTIER_ONE_VERSION_MAJOR, ZEROTIER_ONE_VERSION_MINOR,
+				ZEROTIER_ONE_VERSION_REVISION);
 			out["version"] = tmp;
 			out["clock"] = OSUtils::now();
 
@@ -2454,7 +2747,8 @@ class OneServiceImpl : public OneService {
 				out["config"] = _localConfig;
 			}
 			json& settings = out["config"]["settings"];
-			settings["allowTcpFallbackRelay"] = OSUtils::jsonBool(settings["allowTcpFallbackRelay"], _allowTcpFallbackRelay);
+			settings["allowTcpFallbackRelay"] =
+				OSUtils::jsonBool(settings["allowTcpFallbackRelay"], _allowTcpFallbackRelay);
 			settings["forceTcpRelay"] = OSUtils::jsonBool(settings["forceTcpRelay"], _forceTcpRelay);
 			settings["primaryPort"] = OSUtils::jsonInt(settings["primaryPort"], (uint64_t)_primaryPort) & 0xffff;
 			settings["secondaryPort"] = OSUtils::jsonInt(settings["secondaryPort"], (uint64_t)_ports[1]) & 0xffff;
@@ -2505,12 +2799,33 @@ class OneServiceImpl : public OneService {
 			std::string responseContentType = "text/html";
 			std::string responseBody = "";
 			json outData;
+			// Pre-populate every variable the SSO response template references so
+			// inja can render on all code paths (a missing variable makes inja throw,
+			// which previously turned a real SSO/IdP error into an opaque 500:
+			// "variable 'networkId' not found").
+			outData["isError"] = false;
+			outData["messageText"] = "";
+
+			// Resolve the network id from the OAuth "state" param up front so it is
+			// available to the response template on every path, including the
+			// IdP-error branch below (OAuth error redirects still carry "state").
+			// zeroidc_network_id_from_state() returns null for a missing/malformed
+			// state, so guard before constructing a std::string from it.
+			std::string networkIdStr;
+			{
+				std::string state = req.get_param_value("state");
+				char* nwid = rustybits::zeroidc_network_id_from_state(state.c_str());
+				if (nwid != nullptr) {
+					networkIdStr = std::string(nwid);
+					rustybits::free_cstr(nwid);
+				}
+			}
+			outData["networkId"] = networkIdStr;
 
 			if (req.has_param("error")) {
 				std::string error = req.get_param_value("error");
 				std::string desc = req.get_param_value("error_description");
 
-				json data;
 				outData["isError"] = true;
 				outData["messageText"] = (std::string("ERROR ") + error + std::string(": ") + desc);
 				responseBody = inja::render(htmlTemplate, outData);
@@ -2520,15 +2835,7 @@ class OneServiceImpl : public OneService {
 				return;
 			}
 
-			// SSO redirect handling
-			std::string state = req.get_param_value("state");
-			char* nwid = zeroidc::zeroidc_network_id_from_state(state.c_str());
-
-			outData["networkId"] = std::string(nwid);
-
-			const uint64_t id = Utils::hexStrToU64(nwid);
-
-			zeroidc::free_cstr(nwid);
+			const uint64_t id = Utils::hexStrToU64(networkIdStr.c_str());
 
 			Mutex::Lock l(_nets_m);
 			if (_nets.find(id) != _nets.end()) {
@@ -2560,7 +2867,16 @@ class OneServiceImpl : public OneService {
 					res.status = 500;
 				}
 
-				zeroidc::free_cstr(ret);
+				rustybits::free_cstr(ret);
+			}
+			else {
+				// Network isn't loaded on this agent; render an error page
+				// rather than returning an empty 200 body.
+				outData["isError"] = true;
+				outData["messageText"] = "ERROR: Network not found.";
+				responseBody = inja::render(htmlTemplate, outData);
+				res.set_content(responseBody, responseContentType);
+				res.status = 404;
 			}
 		};
 		_controlPlane.Get(ssoPath, ssoGet);
@@ -2585,26 +2901,27 @@ class OneServiceImpl : public OneService {
 		_controlPlane.Get(metricsPath, metricsGet);
 		_controlPlaneV6.Get(metricsPath, metricsGet);
 
-		auto exceptionHandler = [&, setContent](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
-			auto provider = opentelemetry::trace::Provider::GetTracerProvider();
-			auto tracer = provider->GetTracer("http_control_plane");
-			auto span = tracer->StartSpan("http_control_plane::exceptionHandler");
-			auto scope = tracer->WithActiveSpan(span);
+		auto exceptionHandler =
+			[&, setContent](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
+				auto provider = opentelemetry::trace::Provider::GetTracerProvider();
+				auto tracer = provider->GetTracer("http_control_plane");
+				auto span = tracer->StartSpan("http_control_plane::exceptionHandler");
+				auto scope = tracer->WithActiveSpan(span);
 
-			char buf[1024];
-			auto fmt = "{\"error\": %d, \"description\": \"%s\"}";
-			try {
-				std::rethrow_exception(ep);
-			}
-			catch (std::exception& e) {
-				snprintf(buf, sizeof(buf), fmt, 500, e.what());
-			}
-			catch (...) {
-				snprintf(buf, sizeof(buf), fmt, 500, "Unknown Exception");
-			}
-			setContent(req, res, buf);
-			res.status = 500;
-		};
+				char buf[1024];
+				auto fmt = "{\"error\": %d, \"description\": \"%s\"}";
+				try {
+					std::rethrow_exception(ep);
+				}
+				catch (std::exception& e) {
+					snprintf(buf, sizeof(buf), fmt, 500, e.what());
+				}
+				catch (...) {
+					snprintf(buf, sizeof(buf), fmt, 500, "Unknown Exception");
+				}
+				setContent(req, res, buf);
+				res.status = 500;
+			};
 		_controlPlane.set_exception_handler(exceptionHandler);
 		_controlPlaneV6.set_exception_handler(exceptionHandler);
 
@@ -2620,8 +2937,9 @@ class OneServiceImpl : public OneService {
 		_controlPlaneV6.set_pre_routing_handler(authCheck);
 
 #if ZT_DEBUG == 1
-		//_controlPlane.set_logger([](const httplib::Request& req, const httplib::Response& res) { fprintf(stderr, "%s", http_log(req, res).c_str()); });
-		//_controlPlaneV6.set_logger([](const httplib::Request& req, const httplib::Response& res) { fprintf(stderr, "%s", http_log(req, res).c_str()); });
+		//_controlPlane.set_logger([](const httplib::Request& req, const httplib::Response& res) { fprintf(stderr, "%s",
+		//http_log(req, res).c_str()); }); _controlPlaneV6.set_logger([](const httplib::Request& req, const
+		//httplib::Response& res) { fprintf(stderr, "%s", http_log(req, res).c_str()); });
 #endif
 		if (_primaryPort == 0) {
 			fprintf(stderr, "unable to determine local control port");
@@ -2761,24 +3079,34 @@ class OneServiceImpl : public OneService {
 			std::string defaultBondingPolicyStr(OSUtils::jsonString(settings["defaultBondingPolicy"], ""));
 			int defaultBondingPolicy = _node->bondController()->getPolicyCodeByStr(defaultBondingPolicyStr);
 			_node->bondController()->setBondingLayerDefaultPolicy(defaultBondingPolicy);
-			_node->bondController()->setBondingLayerDefaultPolicyStr(defaultBondingPolicyStr);	 // Used if custom policy
+			_node->bondController()->setBondingLayerDefaultPolicyStr(
+				defaultBondingPolicyStr);	// Used if custom policy
 			// Custom Policies
 			json& customBondingPolicies = settings["policies"];
-			for (json::iterator policyItr = customBondingPolicies.begin(); policyItr != customBondingPolicies.end(); ++policyItr) {
+			for (json::iterator policyItr = customBondingPolicies.begin(); policyItr != customBondingPolicies.end();
+				 ++policyItr) {
 				// Custom Policy
 				std::string customPolicyStr(policyItr.key());
 				json& customPolicy = policyItr.value();
 				std::string basePolicyStr(OSUtils::jsonString(customPolicy["basePolicy"], ""));
 				if (basePolicyStr.empty()) {
-					fprintf(stderr, "error: no base policy was specified for custom policy (%s)\n", customPolicyStr.c_str());
+					fprintf(
+						stderr, "error: no base policy was specified for custom policy (%s)\n",
+						customPolicyStr.c_str());
 				}
 				int basePolicyCode = _node->bondController()->getPolicyCodeByStr(basePolicyStr);
 				if (basePolicyCode == ZT_BOND_POLICY_NONE) {
-					fprintf(stderr, "error: custom policy (%s) is invalid, unknown base policy (%s).\n", customPolicyStr.c_str(), basePolicyStr.c_str());
+					fprintf(
+						stderr, "error: custom policy (%s) is invalid, unknown base policy (%s).\n",
+						customPolicyStr.c_str(), basePolicyStr.c_str());
 					continue;
 				}
 				if (_node->bondController()->getPolicyCodeByStr(customPolicyStr) != ZT_BOND_POLICY_NONE) {
-					fprintf(stderr, "error: custom policy (%s) will be ignored, cannot use standard policy names for custom policies.\n", customPolicyStr.c_str());
+					fprintf(
+						stderr,
+						"error: custom policy (%s) will be ignored, cannot use standard policy names for custom "
+						"policies.\n",
+						customPolicyStr.c_str());
 					continue;
 				}
 				// New bond, used as a copy template for new instances
@@ -2801,7 +3129,8 @@ class OneServiceImpl : public OneService {
 				// Bond-specific properties
 				newTemplateBond->setUpDelay(OSUtils::jsonInt(customPolicy["upDelay"], -1));
 				newTemplateBond->setDownDelay(OSUtils::jsonInt(customPolicy["downDelay"], -1));
-				newTemplateBond->setFailoverInterval(OSUtils::jsonInt(customPolicy["failoverInterval"], ZT_BOND_FAILOVER_DEFAULT_INTERVAL));
+				newTemplateBond->setFailoverInterval(
+					OSUtils::jsonInt(customPolicy["failoverInterval"], ZT_BOND_FAILOVER_DEFAULT_INTERVAL));
 				newTemplateBond->setPacketsPerLink(OSUtils::jsonInt(customPolicy["packetsPerLink"], -1));
 
 				// Policy-Specific link set
@@ -2833,7 +3162,9 @@ class OneServiceImpl : public OneService {
 						failoverToStr = "";
 						enabled = false;
 					}
-					_node->bondController()->addCustomLink(customPolicyStr, new Link(linkNameStr, ipvPref, mtu, capacity, enabled, linkMode, failoverToStr));
+					_node->bondController()->addCustomLink(
+						customPolicyStr,
+						new Link(linkNameStr, ipvPref, mtu, capacity, enabled, linkMode, failoverToStr));
 				}
 				// Check for new field name first, fall back to legacy field name for backward compatibility
 				std::string linkSelectMethodStr;
@@ -2843,7 +3174,11 @@ class OneServiceImpl : public OneService {
 				else {
 					linkSelectMethodStr = OSUtils::jsonString(customPolicy["activeReselect"], "always");
 					if (customPolicy.contains("activeReselect")) {
-						fprintf(stderr, "warning: 'activeReselect' is deprecated, please use 'linkSelectMethod' instead in policy '%s'\n", customPolicyStr.c_str());
+						fprintf(
+							stderr,
+							"warning: 'activeReselect' is deprecated, please use 'linkSelectMethod' instead in policy "
+							"'%s'\n",
+							customPolicyStr.c_str());
 					}
 				}
 
@@ -2860,10 +3195,13 @@ class OneServiceImpl : public OneService {
 					newTemplateBond->setLinkSelectMethod(ZT_BOND_RESELECTION_POLICY_OPTIMIZE);
 				}
 				if (newTemplateBond->getLinkSelectMethod() < 0 || newTemplateBond->getLinkSelectMethod() > 3) {
-					fprintf(stderr, "warning: invalid value (%s) for linkSelectMethod, assuming mode: always\n", linkSelectMethodStr.c_str());
+					fprintf(
+						stderr, "warning: invalid value (%s) for linkSelectMethod, assuming mode: always\n",
+						linkSelectMethodStr.c_str());
 				}
 				if (! _node->bondController()->addCustomPolicy(newTemplateBond)) {
-					fprintf(stderr, "error: a custom policy of this name (%s) already exists.\n", customPolicyStr.c_str());
+					fprintf(
+						stderr, "error: a custom policy of this name (%s) already exists.\n", customPolicyStr.c_str());
 				}
 			}
 			// Peer-specific bonding
@@ -2873,7 +3211,9 @@ class OneServiceImpl : public OneService {
 			}
 			// Check settings
 			if (defaultBondingPolicyStr.length() && ! defaultBondingPolicy && ! _node->bondController()->inUse()) {
-				fprintf(stderr, "error: unknown policy (%s) specified by defaultBondingPolicy, bond disabled.\n", defaultBondingPolicyStr.c_str());
+				fprintf(
+					stderr, "error: unknown policy (%s) specified by defaultBondingPolicy, bond disabled.\n",
+					defaultBondingPolicyStr.c_str());
 			}
 		}
 
@@ -2883,19 +3223,23 @@ class OneServiceImpl : public OneService {
 		if (_forceTcpRelayTmp && _bondInUse) {
 			fprintf(stderr, "Warning: forceTcpRelay cannot be used with multipath. Disabling forceTcpRelay\n");
 		}
-		_allowTcpFallbackRelay = (OSUtils::jsonBool(settings["allowTcpFallbackRelay"], true) && ! _node->bondController()->inUse());
+		_allowTcpFallbackRelay =
+			(OSUtils::jsonBool(settings["allowTcpFallbackRelay"], true) && ! _node->bondController()->inUse());
 		_forceTcpRelay = (_forceTcpRelayTmp && ! _node->bondController()->inUse());
 		_enableWebServer = (OSUtils::jsonBool(settings["enableWebServer"], false));
 
 #ifdef ZT_TCP_FALLBACK_RELAY
-		_fallbackRelayAddress = InetAddress(OSUtils::jsonString(settings["tcpFallbackRelay"], ZT_TCP_FALLBACK_RELAY).c_str());
+		_fallbackRelayAddress =
+			InetAddress(OSUtils::jsonString(settings["tcpFallbackRelay"], ZT_TCP_FALLBACK_RELAY).c_str());
 #endif
 		_primaryPort = (unsigned int)OSUtils::jsonInt(settings["primaryPort"], (uint64_t)_primaryPort) & 0xffff;
 		_allowSecondaryPort = OSUtils::jsonBool(settings["allowSecondaryPort"], true);
 		_secondaryPort = (unsigned int)OSUtils::jsonInt(settings["secondaryPort"], 0);
 		_tertiaryPort = (unsigned int)OSUtils::jsonInt(settings["tertiaryPort"], 0);
 		if (_secondaryPort != 0 || _tertiaryPort != 0) {
-			fprintf(stderr, "WARNING: using manually-specified secondary and/or tertiary ports. This can cause NAT issues." ZT_EOL_S);
+			fprintf(
+				stderr, "WARNING: using manually-specified secondary and/or tertiary ports. This can cause NAT "
+						"issues." ZT_EOL_S);
 		}
 		_portMappingEnabled = OSUtils::jsonBool(settings["portMappingEnabled"], true);
 		_node->setEncryptedHelloEnabled(OSUtils::jsonBool(settings["encryptedHelloEnabled"], false));
@@ -2908,7 +3252,10 @@ class OneServiceImpl : public OneService {
 			unsigned int maxConcurrency = std::thread::hardware_concurrency();
 			if (_concurrency <= 1 || _concurrency >= maxConcurrency) {
 				unsigned int conservativeDefault = (std::thread::hardware_concurrency() >= 4 ? 2 : 1);
-				fprintf(stderr, "Concurrency level provided (%d) is invalid, assigning conservative default value of (%d)\n", _concurrency, conservativeDefault);
+				fprintf(
+					stderr,
+					"Concurrency level provided (%d) is invalid, assigning conservative default value of (%d)\n",
+					_concurrency, conservativeDefault);
 				_concurrency = conservativeDefault;
 			}
 			setUpMultithreading();
@@ -3074,7 +3421,8 @@ class OneServiceImpl : public OneService {
 #ifdef __APPLE__
 				// We can't add multiple addresses to an interface on macOs unless we futz with the netmask.
 				// see `man ifconfig`, alias section
-				// "If the address is on the same subnet as the first network address for this interface, a non-conflicting netmask must be given.  Usually 0xffffffff is most appropriate."
+				// "If the address is on the same subnet as the first network address for this interface, a
+				// non-conflicting netmask must be given.  Usually 0xffffffff is most appropriate."
 
 				auto same_subnet = [ip](InetAddress i) { return ip->network() == i.network(); };
 #endif
@@ -3082,7 +3430,9 @@ class OneServiceImpl : public OneService {
 				if (std::find(n.managedIps().begin(), n.managedIps().end(), *ip) == n.managedIps().end()) {
 #ifdef __APPLE__
 					// if same subnet as a previously added address
-					if (std::find_if(n.managedIps().begin(), n.managedIps().end(), same_subnet) != n.managedIps().end() || std::find_if(newManagedIps2.begin(), newManagedIps2.end(), same_subnet) != newManagedIps2.end()) {
+					if (std::find_if(n.managedIps().begin(), n.managedIps().end(), same_subnet) != n.managedIps().end()
+						|| std::find_if(newManagedIps2.begin(), newManagedIps2.end(), same_subnet)
+							   != newManagedIps2.end()) {
 						if (ip->isV4()) {
 							ip->setPort(32);
 						}
@@ -3107,11 +3457,13 @@ class OneServiceImpl : public OneService {
 			}
 
 #ifdef __APPLE__
-			if (! MacDNSHelper::addIps6(n.config().nwid, n.config().mac, n.tap()->deviceName().c_str(), newManagedIps)) {
+			if (! MacDNSHelper::addIps6(
+					n.config().nwid, n.config().mac, n.tap()->deviceName().c_str(), newManagedIps)) {
 				fprintf(stderr, "ERROR: unable to add v6 addresses to system configuration" ZT_EOL_S);
 			}
 
-			if (! MacDNSHelper::addIps4(n.config().nwid, n.config().mac, n.tap()->deviceName().c_str(), newManagedIps)) {
+			if (! MacDNSHelper::addIps4(
+					n.config().nwid, n.config().mac, n.tap()->deviceName().c_str(), newManagedIps)) {
 				fprintf(stderr, "ERROR: unable to add v4 addresses to system configuration" ZT_EOL_S);
 			}
 #endif
@@ -3122,7 +3474,9 @@ class OneServiceImpl : public OneService {
 			// Get tap device name (use LUID in hex on Windows) and IP addresses.
 #if defined(__WINDOWS__) && ! defined(ZT_SDK)
 			char tapdevbuf[64];
-			OSUtils::ztsnprintf(tapdevbuf, sizeof(tapdevbuf), "%.16llx", (unsigned long long)((WindowsEthernetTap*)(n.tap().get()))->luid().Value);
+			OSUtils::ztsnprintf(
+				tapdevbuf, sizeof(tapdevbuf), "%.16llx",
+				(unsigned long long)((WindowsEthernetTap*)(n.tap().get()))->luid().Value);
 			std::string tapdev(tapdevbuf);
 #else
 			std::string tapdev(n.tap()->deviceName());
@@ -3140,7 +3494,8 @@ class OneServiceImpl : public OneService {
 
 				// Make sure we are allowed to set this managed route, and that 'via' is not our IP. The latter
 				// avoids setting routes via the router on the router.
-				if ((! checkIfManagedIsAllowed(n, *target)) || ((via->ss_family == target->ss_family) && (matchIpOnly(myIps, *via))))
+				if ((! checkIfManagedIsAllowed(n, *target))
+					|| ((via->ss_family == target->ss_family) && (matchIpOnly(myIps, *via))))
 					continue;
 
 				// Find an IP on the interface that can be a source IP, abort if no IPs assigned.
@@ -3148,7 +3503,8 @@ class OneServiceImpl : public OneService {
 				unsigned int mostMatchingPrefixBits = 0;
 				for (std::set<InetAddress>::const_iterator i(myIps.begin()); i != myIps.end(); ++i) {
 					const unsigned int matchingPrefixBits = i->matchingPrefixBits(*target);
-					if (matchingPrefixBits >= mostMatchingPrefixBits && ((target->isV4() && i->isV4()) || (target->isV6() && i->isV6()))) {
+					if (matchingPrefixBits >= mostMatchingPrefixBits
+						&& ((target->isV4() && i->isV4()) || (target->isV6() && i->isV6()))) {
 						mostMatchingPrefixBits = matchingPrefixBits;
 						src = &(*i);
 					}
@@ -3179,7 +3535,8 @@ class OneServiceImpl : public OneService {
 #endif
 			}
 
-			for (std::map<InetAddress, SharedPtr<ManagedRoute> >::iterator r(n.managedRoutes().begin()); r != n.managedRoutes().end();) {
+			for (std::map<InetAddress, SharedPtr<ManagedRoute> >::iterator r(n.managedRoutes().begin());
+				 r != n.managedRoutes().end();) {
 				if (haveRouteTargets.find(r->first) == haveRouteTargets.end())
 					n.managedRoutes().erase(r++);
 				else
@@ -3189,11 +3546,13 @@ class OneServiceImpl : public OneService {
 			// Sync device-local managed routes first, then indirect results. That way
 			// we don't get destination unreachable for routes that are via things
 			// that do not yet have routes in the system.
-			for (std::map<InetAddress, SharedPtr<ManagedRoute> >::iterator r(n.managedRoutes().begin()); r != n.managedRoutes().end(); ++r) {
+			for (std::map<InetAddress, SharedPtr<ManagedRoute> >::iterator r(n.managedRoutes().begin());
+				 r != n.managedRoutes().end(); ++r) {
 				if (! r->second->via())
 					r->second->sync();
 			}
-			for (std::map<InetAddress, SharedPtr<ManagedRoute> >::iterator r(n.managedRoutes().begin()); r != n.managedRoutes().end(); ++r) {
+			for (std::map<InetAddress, SharedPtr<ManagedRoute> >::iterator r(n.managedRoutes().begin());
+				 r != n.managedRoutes().end(); ++r) {
 				if (r->second->via() && (! r->second->target().isDefaultRoute() || _node->online())) {
 					r->second->sync();
 				}
@@ -3227,7 +3586,13 @@ class OneServiceImpl : public OneService {
 	// Handlers for Node and Phy<> callbacks
 	// =========================================================================
 
-	inline void phyOnDatagram(PhySocket* sock, void** uptr, const struct sockaddr* localAddr, const struct sockaddr* from, void* data, unsigned long len)
+	inline void phyOnDatagram(
+		PhySocket* sock,
+		void** uptr,
+		const struct sockaddr* localAddr,
+		const struct sockaddr* from,
+		void* data,
+		unsigned long len)
 	{
 		if (_forceTcpRelay) {
 			return;
@@ -3237,7 +3602,9 @@ class OneServiceImpl : public OneService {
 		if ((len >= 16) && (reinterpret_cast<const InetAddress*>(from)->ipScope() == InetAddress::IP_SCOPE_GLOBAL)) {
 			_lastDirectReceiveFromGlobal = now;
 		}
-		const ZT_ResultCode rc = _node->processWirePacket(nullptr, now, reinterpret_cast<int64_t>(sock), reinterpret_cast<const struct sockaddr_storage*>(from), data, len, &_nextBackgroundTaskDeadline);
+		const ZT_ResultCode rc = _node->processWirePacket(
+			nullptr, now, reinterpret_cast<int64_t>(sock), reinterpret_cast<const struct sockaddr_storage*>(from), data,
+			len, &_nextBackgroundTaskDeadline);
 		if (ZT_ResultCode_isFatal(rc)) {
 			char tmp[256];
 			OSUtils::ztsnprintf(tmp, sizeof(tmp), "fatal error code from processWirePacket: %d", (int)rc);
@@ -3273,7 +3640,8 @@ class OneServiceImpl : public OneService {
 		}
 	}
 
-	inline void phyOnTcpAccept(PhySocket* sockL, PhySocket* sockN, void** uptrL, void** uptrN, const struct sockaddr* from)
+	inline void
+	phyOnTcpAccept(PhySocket* sockL, PhySocket* sockN, void** uptrL, void** uptrN, const struct sockaddr* from)
 	{
 		if (! from) {
 			_phy.close(sockN, false);
@@ -3281,7 +3649,8 @@ class OneServiceImpl : public OneService {
 		}
 		else {
 #ifdef ZT_SDK
-			// Immediately close new local connections. The intention is to prevent the backplane from being accessed when operating as libzt
+			// Immediately close new local connections. The intention is to prevent the backplane from being accessed
+			// when operating as libzt
 			if (! allowHttpBackplaneManagement && ((InetAddress*)from)->ipScope() == InetAddress::IP_SCOPE_LOOPBACK) {
 				_phy.close(sockN, false);
 				return;
@@ -3315,7 +3684,8 @@ class OneServiceImpl : public OneService {
 			}
 			{
 				Mutex::Lock _l(_tcpConnections_m);
-				_tcpConnections.erase(std::remove(_tcpConnections.begin(), _tcpConnections.end(), tc), _tcpConnections.end());
+				_tcpConnections.erase(
+					std::remove(_tcpConnections.begin(), _tcpConnections.end(), tc), _tcpConnections.end());
 			}
 			delete tc;
 		}
@@ -3344,7 +3714,8 @@ class OneServiceImpl : public OneService {
 					tc->readq.append((const char*)data, len);
 					while (tc->readq.length() >= 5) {
 						const char* data = tc->readq.data();
-						const unsigned long mlen = (((((unsigned long)data[3]) & 0xff) << 8) | (((unsigned long)data[4]) & 0xff));
+						const unsigned long mlen =
+							(((((unsigned long)data[3]) & 0xff) << 8) | (((unsigned long)data[4]) & 0xff));
 						if (tc->readq.length() >= (mlen + 5)) {
 							InetAddress from;
 
@@ -3358,7 +3729,10 @@ class OneServiceImpl : public OneService {
 								switch (data[0]) {
 									case 4:	  // IPv4
 										if (plen >= 7) {
-											from.set((const void*)(data + 1), 4, ((((unsigned int)data[5]) & 0xff) << 8) | (((unsigned int)data[6]) & 0xff));
+											from.set(
+												(const void*)(data + 1), 4,
+												((((unsigned int)data[5]) & 0xff) << 8)
+													| (((unsigned int)data[6]) & 0xff));
 											data += 7;	 // type + 4 byte IP + 2 byte port
 											plen -= 7;
 										}
@@ -3369,7 +3743,10 @@ class OneServiceImpl : public OneService {
 										break;
 									case 6:	  // IPv6
 										if (plen >= 19) {
-											from.set((const void*)(data + 1), 16, ((((unsigned int)data[17]) & 0xff) << 8) | (((unsigned int)data[18]) & 0xff));
+											from.set(
+												(const void*)(data + 1), 16,
+												((((unsigned int)data[17]) & 0xff) << 8)
+													| (((unsigned int)data[18]) & 0xff));
 											data += 19;	  // type + 16 byte IP + 2 byte port
 											plen -= 19;
 										}
@@ -3389,10 +3766,13 @@ class OneServiceImpl : public OneService {
 
 								if (from) {
 									InetAddress fakeTcpLocalInterfaceAddress((uint32_t)0xffffffff, 0xffff);
-									const ZT_ResultCode rc = _node->processWirePacket((void*)0, OSUtils::now(), -1, reinterpret_cast<struct sockaddr_storage*>(&from), data, plen, &_nextBackgroundTaskDeadline);
+									const ZT_ResultCode rc = _node->processWirePacket(
+										(void*)0, OSUtils::now(), -1, reinterpret_cast<struct sockaddr_storage*>(&from),
+										data, plen, &_nextBackgroundTaskDeadline);
 									if (ZT_ResultCode_isFatal(rc)) {
 										char tmp[256];
-										OSUtils::ztsnprintf(tmp, sizeof(tmp), "fatal error code from processWirePacket: %d", (int)rc);
+										OSUtils::ztsnprintf(
+											tmp, sizeof(tmp), "fatal error code from processWirePacket: %d", (int)rc);
 										Mutex::Lock _l(_termReason_m);
 										_termReason = ONE_UNRECOVERABLE_ERROR;
 										_fatalErrorMessage = tmp;
@@ -3461,62 +3841,64 @@ class OneServiceImpl : public OneService {
 	inline void phyOnUnixData(PhySocket* sock, void** uptr, void* data, unsigned long len)
 	{
 #ifdef ZT_EXTOSDEP
-		if (ExtOsdep::mgmtRecv(*uptr, data, len, [&](unsigned method, const std::string& path, const std::string& data, std::string& resp) {
-				// fprintf(stderr, "mgmtRecv: %u %s %s\n", method, path.c_str(), data.c_str());
-				httplib::Request req;
-				httplib::Response res;
-				req.path = "/" + path;
-				if (method == 1)
-					req.method = "GET";
-				else if (method == 3)
-					req.method = "POST";
-				else if (method == 0)
-					req.method = "DELETE";
-				struct S : public httplib::Stream {
-					const char* ptr;
-					unsigned size;
-					S(const std::string& s) : ptr(s.c_str()), size(s.size())
-					{
-					}
-					virtual bool is_readable() const
-					{
-						return true;
-					}
-					virtual bool is_writable() const
-					{
-						return true;
-					}
-					virtual ssize_t read(char* p, size_t sz)
-					{
-						// fprintf(stderr, "S::read %d\n", (int)size);
-						if (sz > (size_t)size)
-							sz = size;
-						memcpy(p, ptr, sz);
-						size -= (unsigned)sz;
-						ptr += sz;
-						return (ssize_t)sz;
-					}
-					virtual ssize_t write(const char* ptr, size_t size)
-					{
-						// fprintf(stderr, "S::write %d\n", (int)size);
-						return size;
-					}
-					virtual void get_remote_ip_and_port(std::string& ip, int& port) const
-					{
-					}
-					virtual void get_local_ip_and_port(std::string& ip, int& port) const {};
-					virtual socket_t socket() const
-					{
-						return 0;
-					}
-				};
-				S s(data);
+		if (ExtOsdep::mgmtRecv(
+				*uptr, data, len,
+				[&](unsigned method, const std::string& path, const std::string& data, std::string& resp) {
+					// fprintf(stderr, "mgmtRecv: %u %s %s\n", method, path.c_str(), data.c_str());
+					httplib::Request req;
+					httplib::Response res;
+					req.path = "/" + path;
+					if (method == 1)
+						req.method = "GET";
+					else if (method == 3)
+						req.method = "POST";
+					else if (method == 0)
+						req.method = "DELETE";
+					struct S : public httplib::Stream {
+						const char* ptr;
+						unsigned size;
+						S(const std::string& s) : ptr(s.c_str()), size(s.size())
+						{
+						}
+						virtual bool is_readable() const
+						{
+							return true;
+						}
+						virtual bool is_writable() const
+						{
+							return true;
+						}
+						virtual ssize_t read(char* p, size_t sz)
+						{
+							// fprintf(stderr, "S::read %d\n", (int)size);
+							if (sz > (size_t)size)
+								sz = size;
+							memcpy(p, ptr, sz);
+							size -= (unsigned)sz;
+							ptr += sz;
+							return (ssize_t)sz;
+						}
+						virtual ssize_t write(const char* ptr, size_t size)
+						{
+							// fprintf(stderr, "S::write %d\n", (int)size);
+							return size;
+						}
+						virtual void get_remote_ip_and_port(std::string& ip, int& port) const
+						{
+						}
+						virtual void get_local_ip_and_port(std::string& ip, int& port) const {};
+						virtual socket_t socket() const
+						{
+							return 0;
+						}
+					};
+					S s(data);
 
-				bool x = _controlPlane.routing(req, res, s);
-				// fprintf(stderr, "mgmtRecv: done, x %d status %u body %s\n", x, res.status, res.body.c_str());
-				resp = res.body;
-				return res.status;
-			}))
+					bool x = _controlPlane.routing(req, res, s);
+					// fprintf(stderr, "mgmtRecv: done, x %d status %u body %s\n", x, res.status, res.body.c_str());
+					resp = res.body;
+					return res.status;
+				}))
 			_phy.setNotifyWritable(sock, true);
 #endif
 	}
@@ -3528,7 +3910,11 @@ class OneServiceImpl : public OneService {
 #endif
 	}
 
-	inline int nodeVirtualNetworkConfigFunction(uint64_t nwid, void** nuptr, enum ZT_VirtualNetworkConfigOperation op, const ZT_VirtualNetworkConfig* nwc)
+	inline int nodeVirtualNetworkConfigFunction(
+		uint64_t nwid,
+		void** nuptr,
+		enum ZT_VirtualNetworkConfigOperation op,
+		const ZT_VirtualNetworkConfig* nwc)
 	{
 		Mutex::Lock _l(_nets_m);
 		NetworkState& n = _nets[nwid];
@@ -3541,7 +3927,10 @@ class OneServiceImpl : public OneService {
 						char friendlyName[128];
 						OSUtils::ztsnprintf(friendlyName, sizeof(friendlyName), "ZeroTier One [%.16llx]", static_cast<unsigned long long>(nwid));
 
-						n.setTap(EthernetTap::newInstance(nullptr, _concurrency, _cpuPinningEnabled, _homePath.c_str(), MAC(nwc->mac), nwc->mtu, (unsigned int)ZT_IF_METRIC, nwid, friendlyName, StapFrameHandler, (void*)this));
+						n.setTap(
+							EthernetTap::newInstance(
+								nullptr, _concurrency, _cpuPinningEnabled, _homePath.c_str(), MAC(nwc->mac), nwc->mtu,
+								(unsigned int)ZT_IF_METRIC, nwid, friendlyName, StapFrameHandler, (void*)this));
 						*nuptr = (void*)&n;
 
 						char nlcpath[256];
@@ -3567,7 +3956,8 @@ class OneServiceImpl : public OneService {
 									size_t pos = 0;
 									while (true) {
 										size_t nextPos = addresses.find(',', pos);
-										std::string address = addresses.substr(pos, (nextPos == std::string::npos ? addresses.size() : nextPos) - pos);
+										std::string address = addresses.substr(
+											pos, (nextPos == std::string::npos ? addresses.size() : nextPos) - pos);
 										n.addToAllowManagedWhiteList(InetAddress(address.c_str()));
 										if (nextPos == std::string::npos)
 											break;
@@ -3794,15 +4184,18 @@ class OneServiceImpl : public OneService {
 				break;
 			case ZT_STATE_OBJECT_MOON:
 				OSUtils::ztsnprintf(dirname, sizeof(dirname), "%s" ZT_PATH_SEPARATOR_S "moons.d", _homePath.c_str());
-				OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.16llx.moon", dirname, (unsigned long long)id[0]);
+				OSUtils::ztsnprintf(
+					p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.16llx.moon", dirname, (unsigned long long)id[0]);
 				break;
 			case ZT_STATE_OBJECT_NETWORK_CONFIG:
 				OSUtils::ztsnprintf(dirname, sizeof(dirname), "%s" ZT_PATH_SEPARATOR_S "networks.d", _homePath.c_str());
-				OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.16llx.conf", dirname, (unsigned long long)id[0]);
+				OSUtils::ztsnprintf(
+					p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.16llx.conf", dirname, (unsigned long long)id[0]);
 				break;
 			case ZT_STATE_OBJECT_PEER:
 				OSUtils::ztsnprintf(dirname, sizeof(dirname), "%s" ZT_PATH_SEPARATOR_S "peers.d", _homePath.c_str());
-				OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.10llx.peer", dirname, (unsigned long long)id[0]);
+				OSUtils::ztsnprintf(
+					p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.10llx.peer", dirname, (unsigned long long)id[0]);
 				break;
 			default:
 				return;
@@ -3946,13 +4339,19 @@ class OneServiceImpl : public OneService {
 				OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "planet", _homePath.c_str());
 				break;
 			case ZT_STATE_OBJECT_MOON:
-				OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "moons.d" ZT_PATH_SEPARATOR_S "%.16llx.moon", _homePath.c_str(), (unsigned long long)id[0]);
+				OSUtils::ztsnprintf(
+					p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "moons.d" ZT_PATH_SEPARATOR_S "%.16llx.moon",
+					_homePath.c_str(), (unsigned long long)id[0]);
 				break;
 			case ZT_STATE_OBJECT_NETWORK_CONFIG:
-				OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "networks.d" ZT_PATH_SEPARATOR_S "%.16llx.conf", _homePath.c_str(), (unsigned long long)id[0]);
+				OSUtils::ztsnprintf(
+					p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "networks.d" ZT_PATH_SEPARATOR_S "%.16llx.conf",
+					_homePath.c_str(), (unsigned long long)id[0]);
 				break;
 			case ZT_STATE_OBJECT_PEER:
-				OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "peers.d" ZT_PATH_SEPARATOR_S "%.10llx.peer", _homePath.c_str(), (unsigned long long)id[0]);
+				OSUtils::ztsnprintf(
+					p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "peers.d" ZT_PATH_SEPARATOR_S "%.10llx.peer",
+					_homePath.c_str(), (unsigned long long)id[0]);
 				break;
 			default:
 				return -1;
@@ -3978,18 +4377,26 @@ class OneServiceImpl : public OneService {
 		return -1;
 	}
 
-	inline int nodeWirePacketSendFunction(const int64_t localSocket, const struct sockaddr_storage* addr, const void* data, unsigned int len, unsigned int ttl)
+	inline int nodeWirePacketSendFunction(
+		const int64_t localSocket,
+		const struct sockaddr_storage* addr,
+		const void* data,
+		unsigned int len,
+		unsigned int ttl)
 	{
 #ifdef ZT_TCP_FALLBACK_RELAY
 		if (_allowTcpFallbackRelay) {
 			if (addr->ss_family == AF_INET) {
 				// TCP fallback tunnel support, currently IPv4 only
-				if ((len >= 16) && (reinterpret_cast<const InetAddress*>(addr)->ipScope() == InetAddress::IP_SCOPE_GLOBAL)) {
+				if ((len >= 16)
+					&& (reinterpret_cast<const InetAddress*>(addr)->ipScope() == InetAddress::IP_SCOPE_GLOBAL)) {
 					// Engage TCP tunnel fallback if we haven't received anything valid from a global
 					// IP address in ZT_TCP_FALLBACK_AFTER milliseconds. If we do start getting
 					// valid direct traffic we'll stop using it and close the socket after a while.
 					const int64_t now = OSUtils::now();
-					if (_forceTcpRelay || (((now - _lastDirectReceiveFromGlobal) > ZT_TCP_FALLBACK_AFTER) && ((now - _lastRestart) > ZT_TCP_FALLBACK_AFTER))) {
+					if (_forceTcpRelay
+						|| (((now - _lastDirectReceiveFromGlobal) > ZT_TCP_FALLBACK_AFTER)
+							&& ((now - _lastRestart) > ZT_TCP_FALLBACK_AFTER))) {
 						if (_tcpFallbackTunnel) {
 							bool flushNow = false;
 							{
@@ -4006,8 +4413,14 @@ class OneServiceImpl : public OneService {
 									_tcpFallbackTunnel->writeq.push_back((char)((mlen >> 8) & 0xff));
 									_tcpFallbackTunnel->writeq.push_back((char)(mlen & 0xff));
 									_tcpFallbackTunnel->writeq.push_back((char)4);	 // IPv4
-									_tcpFallbackTunnel->writeq.append(reinterpret_cast<const char*>(reinterpret_cast<const void*>(&(reinterpret_cast<const struct sockaddr_in*>(addr)->sin_addr.s_addr))), 4);
-									_tcpFallbackTunnel->writeq.append(reinterpret_cast<const char*>(reinterpret_cast<const void*>(&(reinterpret_cast<const struct sockaddr_in*>(addr)->sin_port))), 2);
+									_tcpFallbackTunnel->writeq.append(
+										reinterpret_cast<const char*>(reinterpret_cast<const void*>(
+											&(reinterpret_cast<const struct sockaddr_in*>(addr)->sin_addr.s_addr))),
+										4);
+									_tcpFallbackTunnel->writeq.append(
+										reinterpret_cast<const char*>(reinterpret_cast<const void*>(
+											&(reinterpret_cast<const struct sockaddr_in*>(addr)->sin_port))),
+										2);
 									_tcpFallbackTunnel->writeq.append((const char*)data, len);
 								}
 							}
@@ -4016,7 +4429,10 @@ class OneServiceImpl : public OneService {
 								phyOnTcpWritable(_tcpFallbackTunnel->sock, &tmpptr);
 							}
 						}
-						else if (_forceTcpRelay || (((now - _lastSendToGlobalV4) < ZT_TCP_FALLBACK_AFTER) && ((now - _lastSendToGlobalV4) > (ZT_PING_CHECK_INTERVAL / 2)))) {
+						else if (
+							_forceTcpRelay
+							|| (((now - _lastSendToGlobalV4) < ZT_TCP_FALLBACK_AFTER)
+								&& ((now - _lastSendToGlobalV4) > (ZT_PING_CHECK_INTERVAL / 2)))) {
 							const InetAddress addr(_fallbackRelayAddress);
 							TcpConnection* tc = new TcpConnection();
 							{
@@ -4030,7 +4446,8 @@ class OneServiceImpl : public OneService {
 							tc->sock = (PhySocket*)0;	// set in connect handler
 							tc->messageSize = 0;
 							bool connected = false;
-							_phy.tcpConnect(reinterpret_cast<const struct sockaddr*>(&addr), connected, (void*)tc, true);
+							_phy.tcpConnect(
+								reinterpret_cast<const struct sockaddr*>(&addr), connected, (void*)tc, true);
 						}
 					}
 					_lastSendToGlobalV4 = now;
@@ -4046,7 +4463,8 @@ class OneServiceImpl : public OneService {
 		// Even when relaying we still send via UDP. This way if UDP starts
 		// working we can instantly "fail forward" to it and stop using TCP
 		// proxy fallback, which is slow.
-		if ((localSocket != -1) && (localSocket != 0) && (_binder.isUdpSocketValid((PhySocket*)((uintptr_t)localSocket)))) {
+		if ((localSocket != -1) && (localSocket != 0)
+			&& (_binder.isUdpSocketValid((PhySocket*)((uintptr_t)localSocket)))) {
 			if ((ttl) && (addr->ss_family == AF_INET)) {
 				_phy.setIp4UdpTtl((PhySocket*)((uintptr_t)localSocket), ttl);
 			}
@@ -4061,7 +4479,15 @@ class OneServiceImpl : public OneService {
 		}
 	}
 
-	inline void nodeVirtualNetworkFrameFunction(uint64_t nwid, void** nuptr, uint64_t sourceMac, uint64_t destMac, unsigned int etherType, unsigned int vlanId, const void* data, unsigned int len)
+	inline void nodeVirtualNetworkFrameFunction(
+		uint64_t nwid,
+		void** nuptr,
+		uint64_t sourceMac,
+		uint64_t destMac,
+		unsigned int etherType,
+		unsigned int vlanId,
+		const void* data,
+		unsigned int len)
 	{
 		NetworkState* n = reinterpret_cast<NetworkState*>(*nuptr);
 		if ((! n) || (! n->tap())) {
@@ -4070,7 +4496,8 @@ class OneServiceImpl : public OneService {
 		n->tap()->put(MAC(sourceMac), MAC(destMac), etherType, data, len);
 	}
 
-	inline int nodePathCheckFunction(uint64_t ztaddr, const int64_t localSocket, const struct sockaddr_storage* remoteAddr)
+	inline int
+	nodePathCheckFunction(uint64_t ztaddr, const int64_t localSocket, const struct sockaddr_storage* remoteAddr)
 	{
 		// Make sure we're not trying to do ZeroTier-over-ZeroTier
 		{
@@ -4094,7 +4521,8 @@ class OneServiceImpl : public OneService {
 		 * revisit if we see recursion problems. */
 
 		// Check blacklists
-		const Hashtable<uint64_t, std::vector<InetAddress> >* blh = (const Hashtable<uint64_t, std::vector<InetAddress> >*)0;
+		const Hashtable<uint64_t, std::vector<InetAddress> >* blh =
+			(const Hashtable<uint64_t, std::vector<InetAddress> >*)0;
 		const std::vector<InetAddress>* gbl = (const std::vector<InetAddress>*)0;
 		if (remoteAddr->ss_family == AF_INET) {
 			blh = &_v4Blacklists;
@@ -4125,7 +4553,8 @@ class OneServiceImpl : public OneService {
 
 	inline int nodePathLookupFunction(uint64_t ztaddr, int family, struct sockaddr_storage* result)
 	{
-		const Hashtable<uint64_t, std::vector<InetAddress> >* lh = (const Hashtable<uint64_t, std::vector<InetAddress> >*)0;
+		const Hashtable<uint64_t, std::vector<InetAddress> >* lh =
+			(const Hashtable<uint64_t, std::vector<InetAddress> >*)0;
 		if (family < 0)
 			lh = (_node->prng() & 1) ? &_v4Hints : &_v6Hints;
 		else if (family == AF_INET)
@@ -4143,9 +4572,18 @@ class OneServiceImpl : public OneService {
 			return 0;
 	}
 
-	inline void tapFrameHandler(uint64_t nwid, const MAC& from, const MAC& to, unsigned int etherType, unsigned int vlanId, const void* data, unsigned int len)
+	inline void tapFrameHandler(
+		uint64_t nwid,
+		const MAC& from,
+		const MAC& to,
+		unsigned int etherType,
+		unsigned int vlanId,
+		const void* data,
+		unsigned int len)
 	{
-		_node->processVirtualNetworkFrame((void*)0, OSUtils::now(), nwid, from.toInt(), to.toInt(), etherType, vlanId, data, len, &_nextBackgroundTaskDeadline);
+		_node->processVirtualNetworkFrame(
+			(void*)0, OSUtils::now(), nwid, from.toInt(), to.toInt(), etherType, vlanId, data, len,
+			&_nextBackgroundTaskDeadline);
 	}
 
 	inline void onHttpResponseFromClient(TcpConnection* tc)
@@ -4190,7 +4628,8 @@ class OneServiceImpl : public OneService {
 
 		{
 			Mutex::Lock _l(_localConfig_m);
-			for (std::vector<std::string>::const_iterator p(_interfacePrefixBlacklist.begin()); p != _interfacePrefixBlacklist.end(); ++p) {
+			for (std::vector<std::string>::const_iterator p(_interfacePrefixBlacklist.begin());
+				 p != _interfacePrefixBlacklist.end(); ++p) {
 				if (! strncmp(p->c_str(), ifname, p->length()))
 					return false;
 			}
@@ -4286,7 +4725,14 @@ class OneServiceImpl : public OneService {
 	}
 };
 
-static int SnodeVirtualNetworkConfigFunction(ZT_Node* node, void* uptr, void* tptr, uint64_t nwid, void** nuptr, enum ZT_VirtualNetworkConfigOperation op, const ZT_VirtualNetworkConfig* nwconf)
+static int SnodeVirtualNetworkConfigFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	uint64_t nwid,
+	void** nuptr,
+	enum ZT_VirtualNetworkConfigOperation op,
+	const ZT_VirtualNetworkConfig* nwconf)
 {
 	return reinterpret_cast<OneServiceImpl*>(uptr)->nodeVirtualNetworkConfigFunction(nwid, nuptr, op, nwconf);
 }
@@ -4294,31 +4740,86 @@ static void SnodeEventCallback(ZT_Node* node, void* uptr, void* tptr, enum ZT_Ev
 {
 	reinterpret_cast<OneServiceImpl*>(uptr)->nodeEventCallback(event, metaData);
 }
-static void SnodeStatePutFunction(ZT_Node* node, void* uptr, void* tptr, enum ZT_StateObjectType type, const uint64_t id[2], const void* data, int len)
+static void SnodeStatePutFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	enum ZT_StateObjectType type,
+	const uint64_t id[2],
+	const void* data,
+	int len)
 {
 	reinterpret_cast<OneServiceImpl*>(uptr)->nodeStatePutFunction(type, id, data, len);
 }
-static int SnodeStateGetFunction(ZT_Node* node, void* uptr, void* tptr, enum ZT_StateObjectType type, const uint64_t id[2], void* data, unsigned int maxlen)
+static int SnodeStateGetFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	enum ZT_StateObjectType type,
+	const uint64_t id[2],
+	void* data,
+	unsigned int maxlen)
 {
 	return reinterpret_cast<OneServiceImpl*>(uptr)->nodeStateGetFunction(type, id, data, maxlen);
 }
-static int SnodeWirePacketSendFunction(ZT_Node* node, void* uptr, void* tptr, int64_t localSocket, const struct sockaddr_storage* addr, const void* data, unsigned int len, unsigned int ttl)
+static int SnodeWirePacketSendFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	int64_t localSocket,
+	const struct sockaddr_storage* addr,
+	const void* data,
+	unsigned int len,
+	unsigned int ttl)
 {
 	return reinterpret_cast<OneServiceImpl*>(uptr)->nodeWirePacketSendFunction(localSocket, addr, data, len, ttl);
 }
-static void SnodeVirtualNetworkFrameFunction(ZT_Node* node, void* uptr, void* tptr, uint64_t nwid, void** nuptr, uint64_t sourceMac, uint64_t destMac, unsigned int etherType, unsigned int vlanId, const void* data, unsigned int len)
+static void SnodeVirtualNetworkFrameFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	uint64_t nwid,
+	void** nuptr,
+	uint64_t sourceMac,
+	uint64_t destMac,
+	unsigned int etherType,
+	unsigned int vlanId,
+	const void* data,
+	unsigned int len)
 {
-	reinterpret_cast<OneServiceImpl*>(uptr)->nodeVirtualNetworkFrameFunction(nwid, nuptr, sourceMac, destMac, etherType, vlanId, data, len);
+	reinterpret_cast<OneServiceImpl*>(uptr)->nodeVirtualNetworkFrameFunction(
+		nwid, nuptr, sourceMac, destMac, etherType, vlanId, data, len);
 }
-static int SnodePathCheckFunction(ZT_Node* node, void* uptr, void* tptr, uint64_t ztaddr, int64_t localSocket, const struct sockaddr_storage* remoteAddr)
+static int SnodePathCheckFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	uint64_t ztaddr,
+	int64_t localSocket,
+	const struct sockaddr_storage* remoteAddr)
 {
 	return reinterpret_cast<OneServiceImpl*>(uptr)->nodePathCheckFunction(ztaddr, localSocket, remoteAddr);
 }
-static int SnodePathLookupFunction(ZT_Node* node, void* uptr, void* tptr, uint64_t ztaddr, int family, struct sockaddr_storage* result)
+static int SnodePathLookupFunction(
+	ZT_Node* node,
+	void* uptr,
+	void* tptr,
+	uint64_t ztaddr,
+	int family,
+	struct sockaddr_storage* result)
 {
 	return reinterpret_cast<OneServiceImpl*>(uptr)->nodePathLookupFunction(ztaddr, family, result);
 }
-static void StapFrameHandler(void* uptr, void* tptr, uint64_t nwid, const MAC& from, const MAC& to, unsigned int etherType, unsigned int vlanId, const void* data, unsigned int len)
+static void StapFrameHandler(
+	void* uptr,
+	void* tptr,
+	uint64_t nwid,
+	const MAC& from,
+	const MAC& to,
+	unsigned int etherType,
+	unsigned int vlanId,
+	const void* data,
+	unsigned int len)
 {
 	reinterpret_cast<OneServiceImpl*>(uptr)->tapFrameHandler(nwid, from, to, etherType, vlanId, data, len);
 }

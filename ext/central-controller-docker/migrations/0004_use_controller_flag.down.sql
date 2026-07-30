@@ -1,0 +1,1 @@
+ALTER TABLE controllers_ctl DROP COLUMN IF EXISTS use_for_new_networks;

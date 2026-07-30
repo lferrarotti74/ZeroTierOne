@@ -1,5 +1,5 @@
 project(prometheus-cpp-simpleapi)
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.13)
 
 add_library               (${PROJECT_NAME} STATIC "./src/simpleapi.cpp" )
 target_sources            (${PROJECT_NAME} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/prometheus/simpleapi.h")

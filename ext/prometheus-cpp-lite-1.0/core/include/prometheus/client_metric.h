@@ -6,8 +6,6 @@
 #include <vector>
 
 namespace prometheus {
-
-  // структура, в которую копируются значения метрик перед их сериализацией
   
   struct ClientMetric {
 

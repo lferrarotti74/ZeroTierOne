@@ -1,0 +1,167 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "unix-base",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-${presetName}",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "${sourceDir}/.deps",
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "inherits": "unix-base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
+      "name": "macos-base",
+      "hidden": true,
+      "inherits": "unix-base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "${sourceDir}/.deps;$env{HOMEBREW_PREFIX};$env{HOMEBREW_PREFIX}/opt/openssl@3;$env{HOMEBREW_PREFIX}/opt/libpq"
+      }
+    },
+
+    { "name": "linux-release",            "inherits": "linux-base", "displayName": "Linux daemon (Release)" },
+    { "name": "linux-debug",              "inherits": "linux-base", "displayName": "Linux daemon (Debug)",   "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "linux-controller-release", "inherits": "linux-base", "displayName": "Linux Central Controller (Release)", "cacheVariables": { "ZT1_CENTRAL_CONTROLLER": "ON" } },
+    { "name": "linux-controller-debug",   "inherits": "linux-base", "displayName": "Linux Central Controller (Debug)",   "cacheVariables": { "ZT1_CENTRAL_CONTROLLER": "ON", "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "linux-free-release",       "inherits": "linux-base", "displayName": "Linux daemon, free / no controller (Release)", "cacheVariables": { "ZT_NONFREE": "OFF" } },
+    { "name": "linux-free-debug",         "inherits": "linux-base", "displayName": "Linux daemon, free / no controller (Debug)",   "cacheVariables": { "ZT_NONFREE": "OFF", "CMAKE_BUILD_TYPE": "Debug" } },
+
+    { "name": "macos-release",            "inherits": "macos-base", "displayName": "macOS daemon (Release)" },
+    { "name": "macos-debug",              "inherits": "macos-base", "displayName": "macOS daemon (Debug)",   "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "macos-controller-release", "inherits": "macos-base", "displayName": "macOS Central Controller (Release)", "cacheVariables": { "ZT1_CENTRAL_CONTROLLER": "ON" } },
+    { "name": "macos-controller-debug",   "inherits": "macos-base", "displayName": "macOS Central Controller (Debug)",   "cacheVariables": { "ZT1_CENTRAL_CONTROLLER": "ON", "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "macos-free-release",       "inherits": "macos-base", "displayName": "macOS daemon, free / no controller (Release)", "cacheVariables": { "ZT_NONFREE": "OFF" } },
+    { "name": "macos-free-debug",         "inherits": "macos-base", "displayName": "macOS daemon, free / no controller (Debug)",   "cacheVariables": { "ZT_NONFREE": "OFF", "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "macos-universal-release",  "inherits": "macos-base", "displayName": "macOS universal daemon (arm64 + x86_64, Release)", "cacheVariables": { "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64" } },
+    { "name": "macos-universal-debug",    "inherits": "macos-base", "displayName": "macOS universal daemon (arm64 + x86_64, Debug)",   "cacheVariables": { "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64", "CMAKE_BUILD_TYPE": "Debug" } },
+
+    {
+      "name": "freebsd-base",
+      "hidden": true,
+      "inherits": "unix-base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "FreeBSD" }
+    },
+    {
+      "name": "openbsd-base",
+      "hidden": true,
+      "inherits": "unix-base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "OpenBSD" }
+    },
+    {
+      "name": "netbsd-base",
+      "hidden": true,
+      "inherits": "unix-base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "NetBSD" }
+    },
+
+    { "name": "freebsd-release",          "inherits": "freebsd-base", "displayName": "FreeBSD daemon (Release)" },
+    { "name": "freebsd-debug",            "inherits": "freebsd-base", "displayName": "FreeBSD daemon (Debug)",   "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "freebsd-free-release",     "inherits": "freebsd-base", "displayName": "FreeBSD daemon, free / no controller (Release)", "cacheVariables": { "ZT_NONFREE": "OFF" } },
+    { "name": "freebsd-free-debug",       "inherits": "freebsd-base", "displayName": "FreeBSD daemon, free / no controller (Debug)",   "cacheVariables": { "ZT_NONFREE": "OFF", "CMAKE_BUILD_TYPE": "Debug" } },
+
+    { "name": "openbsd-release",          "inherits": "openbsd-base", "displayName": "OpenBSD daemon (Release)" },
+    { "name": "openbsd-debug",            "inherits": "openbsd-base", "displayName": "OpenBSD daemon (Debug)",   "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "openbsd-free-release",     "inherits": "openbsd-base", "displayName": "OpenBSD daemon, free / no controller (Release)", "cacheVariables": { "ZT_NONFREE": "OFF" } },
+    { "name": "openbsd-free-debug",       "inherits": "openbsd-base", "displayName": "OpenBSD daemon, free / no controller (Debug)",   "cacheVariables": { "ZT_NONFREE": "OFF", "CMAKE_BUILD_TYPE": "Debug" } },
+
+    { "name": "netbsd-release",           "inherits": "netbsd-base", "displayName": "NetBSD daemon (Release)" },
+    { "name": "netbsd-debug",             "inherits": "netbsd-base", "displayName": "NetBSD daemon (Debug)",   "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "netbsd-free-release",      "inherits": "netbsd-base", "displayName": "NetBSD daemon, free / no controller (Release)", "cacheVariables": { "ZT_NONFREE": "OFF" } },
+    { "name": "netbsd-free-debug",        "inherits": "netbsd-base", "displayName": "NetBSD daemon, free / no controller (Debug)",   "cacheVariables": { "ZT_NONFREE": "OFF", "CMAKE_BUILD_TYPE": "Debug" } },
+
+    {
+      "name": "windows-x64",
+      "displayName": "Windows x64 daemon (MSVC + vcpkg)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build-${presetName}",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static",
+        "CMAKE_PREFIX_PATH": "${sourceDir}/.deps/x64"
+      }
+    },
+    {
+      "name": "windows-arm64",
+      "inherits": "windows-x64",
+      "displayName": "Windows ARM64 daemon (MSVC + vcpkg)",
+      "architecture": "ARM64",
+      "cacheVariables": { "VCPKG_TARGET_TRIPLET": "arm64-windows-static", "CMAKE_PREFIX_PATH": "${sourceDir}/.deps/ARM64" }
+    },
+    {
+      "name": "windows-x86",
+      "inherits": "windows-x64",
+      "displayName": "Windows x86 daemon (MSVC + vcpkg)",
+      "architecture": "Win32",
+      "cacheVariables": { "VCPKG_TARGET_TRIPLET": "x86-windows-static", "CMAKE_PREFIX_PATH": "${sourceDir}/.deps/Win32" }
+    },
+    {
+      "name": "windows-x64-free",
+      "inherits": "windows-x64",
+      "displayName": "Windows x64 daemon (free / ZT_NONFREE=OFF, no bundled controller)",
+      "cacheVariables": { "ZT_NONFREE": "OFF" }
+    },
+    {
+      "name": "windows-arm64-free",
+      "inherits": "windows-arm64",
+      "displayName": "Windows ARM64 daemon (free / ZT_NONFREE=OFF, no bundled controller)",
+      "cacheVariables": { "ZT_NONFREE": "OFF" }
+    },
+    {
+      "name": "windows-x86-free",
+      "inherits": "windows-x86",
+      "displayName": "Windows x86 daemon (free / ZT_NONFREE=OFF, no bundled controller)",
+      "cacheVariables": { "ZT_NONFREE": "OFF" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-release",            "configurePreset": "linux-release" },
+    { "name": "linux-debug",              "configurePreset": "linux-debug" },
+    { "name": "linux-controller-release", "configurePreset": "linux-controller-release" },
+    { "name": "linux-controller-debug",   "configurePreset": "linux-controller-debug" },
+    { "name": "linux-free-release",       "configurePreset": "linux-free-release" },
+    { "name": "linux-free-debug",         "configurePreset": "linux-free-debug" },
+    { "name": "macos-release",            "configurePreset": "macos-release" },
+    { "name": "macos-debug",              "configurePreset": "macos-debug" },
+    { "name": "macos-controller-release", "configurePreset": "macos-controller-release" },
+    { "name": "macos-controller-debug",   "configurePreset": "macos-controller-debug" },
+    { "name": "macos-free-release",       "configurePreset": "macos-free-release" },
+    { "name": "macos-free-debug",         "configurePreset": "macos-free-debug" },
+    { "name": "macos-universal-release",  "configurePreset": "macos-universal-release" },
+    { "name": "macos-universal-debug",    "configurePreset": "macos-universal-debug" },
+    { "name": "freebsd-release",          "configurePreset": "freebsd-release" },
+    { "name": "freebsd-debug",            "configurePreset": "freebsd-debug" },
+    { "name": "freebsd-free-release",     "configurePreset": "freebsd-free-release" },
+    { "name": "freebsd-free-debug",       "configurePreset": "freebsd-free-debug" },
+    { "name": "openbsd-release",          "configurePreset": "openbsd-release" },
+    { "name": "openbsd-debug",            "configurePreset": "openbsd-debug" },
+    { "name": "openbsd-free-release",     "configurePreset": "openbsd-free-release" },
+    { "name": "openbsd-free-debug",       "configurePreset": "openbsd-free-debug" },
+    { "name": "netbsd-release",           "configurePreset": "netbsd-release" },
+    { "name": "netbsd-debug",             "configurePreset": "netbsd-debug" },
+    { "name": "netbsd-free-release",      "configurePreset": "netbsd-free-release" },
+    { "name": "netbsd-free-debug",        "configurePreset": "netbsd-free-debug" },
+    { "name": "windows-x64-release",        "configurePreset": "windows-x64",        "configuration": "Release" },
+    { "name": "windows-x64-debug",          "configurePreset": "windows-x64",        "configuration": "Debug" },
+    { "name": "windows-arm64-release",      "configurePreset": "windows-arm64",      "configuration": "Release" },
+    { "name": "windows-arm64-debug",        "configurePreset": "windows-arm64",      "configuration": "Debug" },
+    { "name": "windows-x86-release",        "configurePreset": "windows-x86",        "configuration": "Release" },
+    { "name": "windows-x86-debug",          "configurePreset": "windows-x86",        "configuration": "Debug" },
+    { "name": "windows-x64-free-release",   "configurePreset": "windows-x64-free",   "configuration": "Release" },
+    { "name": "windows-x64-free-debug",     "configurePreset": "windows-x64-free",   "configuration": "Debug" },
+    { "name": "windows-arm64-free-release", "configurePreset": "windows-arm64-free", "configuration": "Release" },
+    { "name": "windows-arm64-free-debug",   "configurePreset": "windows-arm64-free", "configuration": "Debug" },
+    { "name": "windows-x86-free-release",   "configurePreset": "windows-x86-free",   "configuration": "Release" },
+    { "name": "windows-x86-free-debug",     "configurePreset": "windows-x86-free",   "configuration": "Debug" }
+  ]
+}

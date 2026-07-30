@@ -285,12 +285,6 @@
     <ClCompile Include="..\..\nonfree\controller\CtlUtil.cpp">
       <Filter>Source Files\nonfree\controller</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\nonfree\controller\CV1.cpp">
-      <Filter>Source Files\nonfree\controller</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\nonfree\controller\CV2.cpp">
-      <Filter>Source Files\nonfree\controller</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\nonfree\controller\DB.cpp">
       <Filter>Source Files\nonfree\controller</Filter>
     </ClCompile>
@@ -555,12 +549,6 @@
       <Filter>Header Files\nonfree\controller</Filter>
     </ClInclude>
     <ClInclude Include="..\..\nonfree\controller\CtlUtil.hpp">
-      <Filter>Header Files\nonfree\controller</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\nonfree\controller\CV1.hpp">
-      <Filter>Header Files\nonfree\controller</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\nonfree\controller\CV2.hpp">
       <Filter>Header Files\nonfree\controller</Filter>
     </ClInclude>
     <ClInclude Include="..\..\nonfree\controller\DB.hpp">

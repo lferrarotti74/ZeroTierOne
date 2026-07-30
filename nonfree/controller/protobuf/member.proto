@@ -1,0 +1,51 @@
+/* (c) ZeroTier, Inc.
+ * See LICENSE.txt in nonfree/
+ */
+
+syntax = "proto3";
+
+package pbmessages;
+
+message MemberChange {
+    message Member {
+        string device_id = 1;
+        string network_id = 2;
+        string identity = 3; // Identity of the member
+        bool authorized = 4; // Whether the member is authorized
+        repeated string ip_assignments = 5; // List of IP assignments
+        bool active_bridge = 6; // Whether the member is an active bridge
+        string tags = 7; // JSON string of tags
+        string capabilities = 8; // JSON string of capabilities
+        uint64 creation_time = 9; // Unix timestamp in milliseconds
+        bool no_auto_assign_ips = 10; // Whether auto IP assignment is disabled
+        uint64 revision = 11; // Revision number
+        uint64 last_authorized_time = 12; // Last time the member was authorized
+        uint64 last_deauthorized_time = 13; // Last time the member was deauthorized
+        optional string last_authorized_credential_type = 14; // Type of credential used for last authorization
+        optional string last_authorized_credential = 15; // Credential used for last authorization
+        int32 version_major = 16; // Major version of the member
+        int32 version_minor = 17; // Minor version of the member
+        int32 version_rev = 18; // Patch version of the member
+        int32 version_protocol = 19; // Protocol version of the member
+        int32 remote_trace_level = 20; // Remote trace level
+        optional string remote_trace_target = 21; // Remote trace target
+        bool sso_exempt = 22; // Whether SSO is exempt
+        uint64 auth_expiry_time = 23; // Authorization expiry time in milliseconds
+    }
+    message MemberChangeMetadata {
+        string trace_id = 1;
+        string controller_id = 2; 
+    }
+
+    enum ChangeSource {
+        UNKNOWN = 0;
+        CV1 = 1;
+        CV2 = 2;
+        CONTROLLER = 3;
+    }
+
+    optional Member old = 1;
+    optional Member new = 2;
+    optional MemberChangeMetadata metadata = 3;
+    optional ChangeSource change_source = 4;
+}

@@ -1,0 +1,78 @@
+/* (c) ZeroTier, Inc.
+ * See LICENSE.txt in nonfree/
+ */
+
+syntax = "proto3";
+
+package pbmessages;
+
+message NetworkChange {
+    message NetworkChangeMetadata {
+        string trace_id = 1;
+        string controller_id = 2; 
+    }
+
+    message IPRange {
+        string start_ip = 1; // Start of the IP range
+        string end_ip = 2;   // End of the IP range
+    }
+
+    message Route {
+        string target = 1; // Target IP or network
+        optional string via = 2; // Optional next hop IP
+    }
+
+    message DNS {
+        string domain = 1; // Search domain
+        repeated string nameservers = 2; // List of nameservers
+    }
+
+    message IPV4AssignMode {
+        bool zt = 1; // Whether ZeroTier is used for IPv4 assignment
+    }
+
+    message IPV6AssignMode {
+        bool six_plane = 1; // Whether 6plane is used for IPv6 assignment
+        bool rfc4193 = 2; // Whether RFC 4193 is used for IPv6 assignment
+        bool zt = 3; // Whether ZeroTier is used for IPv6 assignment
+    }
+
+    message Network {
+        string network_id = 1;
+        string capabilities = 2; // JSON string of capabilities
+        uint64 creation_time = 3; // Unix timestamp in milliseconds
+        bool enable_broadcast = 4; // Whether broadcast is enabled
+        repeated IPRange assignment_pools = 5; // List of IP ranges for assignment
+        uint32 mtu = 6; // Maximum Transmission Unit
+        uint32 multicast_limit = 7; // Limit for multicast messages
+        optional string name = 8; // Name of the network
+        bool is_private = 9; // Whether the network is private
+        uint32 remote_trace_level = 10; // Remote trace level
+        optional string remote_trace_target = 11; // Remote trace target
+        uint64 revision = 12; // Revision number
+        repeated Route routes = 13; // List of routes
+        string rules = 14; // JSON string of rules
+        optional string tags = 15; // JSON string of tags
+        IPV4AssignMode ipv4_assign_mode = 16; // IPv4 assignment mode
+        IPV6AssignMode ipv6_assign_mode = 17; // IPv6 assignment mode
+        optional DNS dns = 18; // DNS configuration
+        bool sso_enabled = 19; // Whether Single Sign-On is enabled
+        optional string sso_client_id = 20; // SSO client ID
+        string rules_source = 24; // source code for rules
+        optional string sso_linked_id = 25; // FK into oidc_config(linked_id); paired with sso_client_id resolves the row holding issuer/authorization_endpoint/provider
+        reserved 21, 22, 23;
+        reserved "sso_authorization_endpoint", "sso_issuer", "sso_provider";
+    }
+
+    enum ChangeSource {
+        UNKNOWN = 0;
+        CV1 = 1;
+        CV2 = 2;
+        CONTROLLER = 3;
+    }
+
+    optional Network old = 1;
+    optional Network new = 2;
+    optional NetworkChangeMetadata metadata = 3;
+    optional ChangeSource change_source = 4;
+}

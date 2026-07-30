@@ -4,12 +4,18 @@
 
 #include "FileDB.hpp"
 
-#include "../node/Metrics.hpp"
+#include "../../node/Metrics.hpp"
+#include "CtlUtil.hpp"
 #include "opentelemetry/trace/provider.h"
 
 namespace ZeroTier {
 
-FileDB::FileDB(const char* path) : DB(), _path(path), _networksPath(_path + ZT_PATH_SEPARATOR_S + "network"), _tracePath(_path + ZT_PATH_SEPARATOR_S + "trace"), _running(true)
+FileDB::FileDB(const char* path)
+	: DB()
+	, _path(path)
+	, _networksPath(_path + ZT_PATH_SEPARATOR_S + "network")
+	, _tracePath(_path + ZT_PATH_SEPARATOR_S + "trace")
+	, _running(true)
 {
 	auto provider = opentelemetry::trace::Provider::GetTracerProvider();
 	auto tracer = provider->GetTracer("filedb");
@@ -37,7 +43,8 @@ FileDB::FileDB(const char* path) : DB(), _path(path), _networksPath(_path + ZT_P
 					std::vector<std::string> members(OSUtils::listDirectory(membersPath.c_str(), false));
 					for (auto m = members.begin(); m != members.end(); ++m) {
 						buf.clear();
-						if ((m->length() == 15) && (OSUtils::readFile((membersPath + ZT_PATH_SEPARATOR_S + *m).c_str(), buf))) {
+						if ((m->length() == 15)
+							&& (OSUtils::readFile((membersPath + ZT_PATH_SEPARATOR_S + *m).c_str(), buf))) {
 							try {
 								nlohmann::json member(OSUtils::jsonParse(buf));
 								const std::string addrs = member["id"];
@@ -101,9 +108,10 @@ bool FileDB::save(nlohmann::json& record, bool notifyListeners)
 				get(nwid, old);
 				if ((! old.is_object()) || (! _compareRecords(old, record))) {
 					record["revision"] = OSUtils::jsonInt(record["revision"], 0ULL) + 1ULL;
-					OSUtils::ztsnprintf(p1, sizeof(p1), "%s" ZT_PATH_SEPARATOR_S "%.16llx.json", _networksPath.c_str(), nwid);
+					OSUtils::ztsnprintf(
+						p1, sizeof(p1), "%s" ZT_PATH_SEPARATOR_S "%.16llx.json", _networksPath.c_str(), nwid);
 					if (! OSUtils::writeFile(p1, OSUtils::jsonDump(record, -1))) {
-						fprintf(stderr, "WARNING: controller unable to write to path: %s" ZT_EOL_S, p1);
+						ZTC_LOG("WARNING: controller unable to write to path: %s" ZT_EOL_S, p1);
 					}
 					_networkChanged(old, record, notifyListeners);
 					modified = true;
@@ -121,14 +129,19 @@ bool FileDB::save(nlohmann::json& record, bool notifyListeners)
 				get(nwid, network, id, old);
 				if ((! old.is_object()) || (! _compareRecords(old, record))) {
 					record["revision"] = OSUtils::jsonInt(record["revision"], 0ULL) + 1ULL;
-					OSUtils::ztsnprintf(pb, sizeof(pb), "%s" ZT_PATH_SEPARATOR_S "%.16llx" ZT_PATH_SEPARATOR_S "member", _networksPath.c_str(), (unsigned long long)nwid);
-					OSUtils::ztsnprintf(p1, sizeof(p1), "%s" ZT_PATH_SEPARATOR_S "%.10llx.json", pb, (unsigned long long)id);
+					OSUtils::ztsnprintf(
+						pb, sizeof(pb), "%s" ZT_PATH_SEPARATOR_S "%.16llx" ZT_PATH_SEPARATOR_S "member",
+						_networksPath.c_str(), (unsigned long long)nwid);
+					OSUtils::ztsnprintf(
+						p1, sizeof(p1), "%s" ZT_PATH_SEPARATOR_S "%.10llx.json", pb, (unsigned long long)id);
 					if (! OSUtils::writeFile(p1, OSUtils::jsonDump(record, -1))) {
-						OSUtils::ztsnprintf(p2, sizeof(p2), "%s" ZT_PATH_SEPARATOR_S "%.16llx", _networksPath.c_str(), (unsigned long long)nwid);
+						OSUtils::ztsnprintf(
+							p2, sizeof(p2), "%s" ZT_PATH_SEPARATOR_S "%.16llx", _networksPath.c_str(),
+							(unsigned long long)nwid);
 						OSUtils::mkdir(p2);
 						OSUtils::mkdir(pb);
 						if (! OSUtils::writeFile(p1, OSUtils::jsonDump(record, -1))) {
-							fprintf(stderr, "WARNING: controller unable to write to path: %s" ZT_EOL_S, p1);
+							ZTC_LOG("WARNING: controller unable to write to path: %s" ZT_EOL_S, p1);
 						}
 					}
 					_memberChanged(old, record, notifyListeners);
@@ -154,7 +167,8 @@ void FileDB::eraseNetwork(const uint64_t networkId)
 	char p[16384];
 	OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.16llx.json", _networksPath.c_str(), networkId);
 	OSUtils::rm(p);
-	OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.16llx", _networksPath.c_str(), (unsigned long long)networkId);
+	OSUtils::ztsnprintf(
+		p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.16llx", _networksPath.c_str(), (unsigned long long)networkId);
 	OSUtils::rmDashRf(p);
 	_networkChanged(network, nullJson, true);
 	std::lock_guard<std::mutex> l(this->_online_l);
@@ -171,14 +185,21 @@ void FileDB::eraseMember(const uint64_t networkId, const uint64_t memberId)
 	nlohmann::json network, member, nullJson;
 	get(networkId, network, memberId, member);
 	char p[4096];
-	OSUtils::ztsnprintf(p, sizeof(p), "%s" ZT_PATH_SEPARATOR_S "%.16llx" ZT_PATH_SEPARATOR_S "member" ZT_PATH_SEPARATOR_S "%.10llx.json", _networksPath.c_str(), networkId, memberId);
+	OSUtils::ztsnprintf(
+		p, sizeof(p),
+		"%s" ZT_PATH_SEPARATOR_S "%.16llx" ZT_PATH_SEPARATOR_S "member" ZT_PATH_SEPARATOR_S "%.10llx.json",
+		_networksPath.c_str(), networkId, memberId);
 	OSUtils::rm(p);
 	_memberChanged(member, nullJson, true);
 	std::lock_guard<std::mutex> l(this->_online_l);
 	this->_online[networkId].erase(memberId);
 }
 
-void FileDB::nodeIsOnline(const uint64_t networkId, const uint64_t memberId, const InetAddress& physicalAddress, const char* osArch)
+void FileDB::nodeIsOnline(
+	const uint64_t networkId,
+	const uint64_t memberId,
+	const InetAddress& physicalAddress,
+	const char* osArch)
 {
 	auto provider = opentelemetry::trace::Provider::GetTracerProvider();
 	auto tracer = provider->GetTracer("filedb");

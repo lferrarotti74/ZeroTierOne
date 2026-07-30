@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #endif
 #include "../../include/ZeroTierOne.h"
+#include "CtlUtil.hpp"
 #include "EmbeddedNetworkController.hpp"
 #include "FileDB.hpp"
 
@@ -24,14 +25,16 @@
 #include <thread>
 #include <utility>
 #ifdef ZT_CONTROLLER_USE_LIBPQ
-#include "CV1.hpp"
-#include "CV2.hpp"
+#include "CentralDB.hpp"
+#ifdef ZT1_CENTRAL_CONTROLLER
+#include "ControllerConfig.hpp"
+#endif
 #endif
 
-#include "../node/CertificateOfMembership.hpp"
-#include "../node/Dictionary.hpp"
-#include "../node/NetworkConfig.hpp"
-#include "../node/Node.hpp"
+#include "../../node/CertificateOfMembership.hpp"
+#include "../../node/Dictionary.hpp"
+#include "../../node/NetworkConfig.hpp"
+#include "../../node/Node.hpp"
 #include "opentelemetry/trace/provider.h"
 
 using json = nlohmann::json;
@@ -44,6 +47,11 @@ using json = nlohmann::json;
 
 // Global maximum size of arrays in JSON objects
 #define ZT_CONTROLLER_MAX_ARRAY_SIZE 16384
+
+// Cap on the request queue for controller-initiated re-requests (pushes), which fan
+// out to every online member on a network change. Beyond this they're dropped (the
+// member picks up the change on its next poll) to bound memory under churn.
+#define ZT_CONTROLLER_MAX_QUEUED_REREQUESTS 16384
 
 namespace ZeroTier {
 
@@ -116,29 +124,17 @@ static json _renderRule(ZT_VirtualNetworkRule& rule)
 			case ZT_NETWORK_RULE_MATCH_MAC_SOURCE:
 				r["type"] = "MATCH_MAC_SOURCE";
 				OSUtils::ztsnprintf(
-					tmp,
-					sizeof(tmp),
-					"%.2x:%.2x:%.2x:%.2x:%.2x:%.2x",
-					(unsigned int)rule.v.mac[0],
-					(unsigned int)rule.v.mac[1],
-					(unsigned int)rule.v.mac[2],
-					(unsigned int)rule.v.mac[3],
-					(unsigned int)rule.v.mac[4],
-					(unsigned int)rule.v.mac[5]);
+					tmp, sizeof(tmp), "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x", (unsigned int)rule.v.mac[0],
+					(unsigned int)rule.v.mac[1], (unsigned int)rule.v.mac[2], (unsigned int)rule.v.mac[3],
+					(unsigned int)rule.v.mac[4], (unsigned int)rule.v.mac[5]);
 				r["mac"] = tmp;
 				break;
 			case ZT_NETWORK_RULE_MATCH_MAC_DEST:
 				r["type"] = "MATCH_MAC_DEST";
 				OSUtils::ztsnprintf(
-					tmp,
-					sizeof(tmp),
-					"%.2x:%.2x:%.2x:%.2x:%.2x:%.2x",
-					(unsigned int)rule.v.mac[0],
-					(unsigned int)rule.v.mac[1],
-					(unsigned int)rule.v.mac[2],
-					(unsigned int)rule.v.mac[3],
-					(unsigned int)rule.v.mac[4],
-					(unsigned int)rule.v.mac[5]);
+					tmp, sizeof(tmp), "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x", (unsigned int)rule.v.mac[0],
+					(unsigned int)rule.v.mac[1], (unsigned int)rule.v.mac[2], (unsigned int)rule.v.mac[3],
+					(unsigned int)rule.v.mac[4], (unsigned int)rule.v.mac[5]);
 				r["mac"] = tmp;
 				break;
 			case ZT_NETWORK_RULE_MATCH_IPV4_SOURCE:
@@ -518,7 +514,12 @@ static bool _parseRule(json& r, ZT_VirtualNetworkRule& rule)
 
 }	// anonymous namespace
 
-EmbeddedNetworkController::EmbeddedNetworkController(Node* node, const char* ztPath, const char* dbPath, int listenPort, RedisConfig* rc)
+EmbeddedNetworkController::EmbeddedNetworkController(
+	Node* node,
+	const char* ztPath,
+	const char* dbPath,
+	int listenPort,
+	RedisConfig* rc)
 	: _startTime(OSUtils::now())
 	, _listenPort(listenPort)
 	, _node(node)
@@ -566,15 +567,80 @@ EmbeddedNetworkController::EmbeddedNetworkController(Node* node, const char* ztP
 {
 }
 
+#ifdef ZT1_CENTRAL_CONTROLLER
+EmbeddedNetworkController::EmbeddedNetworkController(
+	Node* node,
+	const char* ztPath,
+	const char* dbPath,
+	int listenPort,
+	const ControllerConfig* cc)
+	: _startTime(OSUtils::now())
+	, _listenPort(listenPort)
+	, _node(node)
+	, _ztPath(ztPath)
+	, _path(dbPath)
+	, _signingId()
+	, _signingIdAddressString()
+	, _sender((NetworkController::Sender*)0)
+	, _db(this)
+	, _queue()
+	, _threads()
+	, _threads_l()
+	, _memberStatus()
+	, _memberStatus_l()
+	, _expiringSoon()
+	, _expiringSoon_l()
+	, _rc(nullptr)
+	, _cc(cc)
+	, _ssoExpiryRunning(true)
+	, _ssoExpiry(std::thread(&EmbeddedNetworkController::_ssoExpiryThread, this))
+#ifdef CENTRAL_CONTROLLER_REQUEST_BENCHMARK
+	, _member_status_lookup { "nc_member_status_lookup", "" }
+	, _member_status_lookup_count { "nc_member_status_lookup_count", "" }
+	, _node_is_online { "nc_node_is_online", "" }
+	, _node_is_online_count { "nc_node_is_online_count", "" }
+	, _get_and_init_member { "nc_get_and_init_member", "" }
+	, _get_and_init_member_count { "nc_get_and_init_member_count", "" }
+	, _have_identity { "nc_have_identity", "" }
+	, _have_identity_count { "nc_have_identity_count", "" }
+	, _determine_auth { "nc_determine_auth", "" }
+	, _determine_auth_count { "nc_determine_auth_count", "" }
+	, _sso_check { "nc_sso_check", "" }
+	, _sso_check_count { "nc_sso_check_count", "" }
+	, _auth_check { "nc_auth_check", "" }
+	, _auth_check_count { "nc_auth_check_count", "" }
+	, _json_schlep { "nc_json_schlep", "" }
+	, _json_schlep_count { "nc_json_schlep_count", "" }
+	, _issue_certificate { "nc_issue_certificate", "" }
+	, _issue_certificate_count { "nc_issue_certificate_count", "" }
+	, _save_member { "nc_save_member", "" }
+	, _save_member_count { "nc_save_member_count", "" }
+	, _send_netconf { "nc_send_netconf2", "" }
+	, _send_netconf_count { "nc_send_netconf2_count", "" }
+#endif
+{
+}
+#endif
+
 EmbeddedNetworkController::~EmbeddedNetworkController()
 {
-	std::lock_guard<std::mutex> l(_threads_l);
+	// Signal shutdown first so any concurrent request() returns early instead of
+	// contending for _threads_l (held across the joins below) or queuing more work
+	// onto the workers we're tearing down. Stop the queue so blocked workers wake.
+	_shuttingDown = true;
 	_queue.stop();
-	for (auto t = _threads.begin(); t != _threads.end(); ++t) {
-		t->join();
+	{
+		std::lock_guard<std::mutex> l(_threads_l);
+		for (auto t = _threads.begin(); t != _threads.end(); ++t) {
+			if (t->joinable()) {
+				t->join();
+			}
+		}
 	}
 	_ssoExpiryRunning = false;
-	_ssoExpiry.join();
+	if (_ssoExpiry.joinable()) {
+		_ssoExpiry.join();
+	}
 }
 
 void EmbeddedNetworkController::setSSORedirectURL(const std::string& url)
@@ -593,36 +659,75 @@ void EmbeddedNetworkController::init(const Identity& signingId, Sender* sender)
 	_signingId = signingId;
 	_sender = sender;
 	_signingIdAddressString = signingId.address().toString(tmp);
+	// Make the controller (node) ID available to ZTC_LOG everywhere, before any DB/worker
+	// threads start. One controller per process, so this is set exactly once.
+	setControllerLogId(_signingIdAddressString);
 
-#ifdef ZT_CONTROLLER_USE_LIBPQ
-	if ((_path.length() > 9) && (_path.substr(0, 9) == "postgres:")) {
-		fprintf(stderr, "CV1\n");
-		_db.addDB(std::shared_ptr<CV1>(new CV1(_signingId, _path.substr(9).c_str(), _listenPort, _rc)));
+#ifdef ZT1_CENTRAL_CONTROLLER
+	if (! _cc) {
+		throw std::runtime_error("controller config required");
 	}
-	else if ((_path.length() > 4) && (_path.substr(0, 4) == "cv2:")) {
-		fprintf(stderr, "CV2\n");
-		_db.addDB(std::shared_ptr<CV2>(new CV2(_signingId, _path.substr(4).c_str(), _listenPort)));
+
+	if (_path.length() < 9 || (_path.substr(0, 9) != "postgres:")) {
+		throw std::runtime_error("central controller requires postgres db");
+	}
+
+	std::string connString = _path.substr(9);
+
+	CentralDB::ListenerMode lm;
+	if (_cc->listenMode == "pgsql") {
+		lm = CentralDB::LISTENER_MODE_PGSQL;
+	}
+	else if (_cc->listenMode == "redis") {
+		lm = CentralDB::LISTENER_MODE_REDIS;
+	}
+	else if (_cc->listenMode == "pubsub") {
+		lm = CentralDB::LISTENER_MODE_PUBSUB;
 	}
 	else {
-		fprintf(stderr, "FileDB\n");
-#endif
-		_db.addDB(std::shared_ptr<FileDB>(new FileDB(_path.c_str())));
-#ifdef ZT_CONTROLLER_USE_LIBPQ
+		throw std::runtime_error("unsupported listen mode");
 	}
-#endif
+
+	CentralDB::StatusWriterMode sm;
+	if (_cc->statusMode == "pgsql") {
+		sm = CentralDB::STATUS_WRITER_MODE_PGSQL;
+	}
+	else if (_cc->statusMode == "redis") {
+		sm = CentralDB::STATUS_WRITER_MODE_REDIS;
+	}
+	else if (_cc->statusMode == "bigtable") {
+		sm = CentralDB::STATUS_WRITER_MODE_BIGTABLE;
+	}
+	else {
+		throw std::runtime_error("unsupported status mode");
+	}
+
+	_db.addDB(std::shared_ptr<CentralDB>(new CentralDB(_signingId, connString.c_str(), _listenPort, lm, sm, _cc)));
+#else
+	_db.addDB(std::shared_ptr<FileDB>(new FileDB(_path.c_str())));
+#endif	 // ZT1_CENTRAL_CONTROLLER
 
 	_db.waitForReady();
 }
 
-void EmbeddedNetworkController::request(uint64_t nwid, const InetAddress& fromAddr, uint64_t requestPacketId, const Identity& identity, const Dictionary<ZT_NETWORKCONFIG_METADATA_DICT_CAPACITY>& metaData)
+void EmbeddedNetworkController::request(
+	uint64_t nwid,
+	const InetAddress& fromAddr,
+	uint64_t requestPacketId,
+	const Identity& identity,
+	const Dictionary<ZT_NETWORKCONFIG_METADATA_DICT_CAPACITY>& metaData)
 {
 	auto provider = opentelemetry::trace::Provider::GetTracerProvider();
 	auto tracer = provider->GetTracer("embedded_controller");
 	auto span = tracer->StartSpan("embedded_controller::request");
 	auto scope = tracer->WithActiveSpan(span);
 
-	if (((! _signingId) || (! _signingId.hasPrivate())) || (_signingId.address().toInt() != (nwid >> 24)) || (! _sender))
+	if (((! _signingId) || (! _signingId.hasPrivate())) || (_signingId.address().toInt() != (nwid >> 24))
+		|| (! _sender))
 		return;
+	if (_shuttingDown) {
+		return;
+	}
 	_startThreads();
 
 	const int64_t now = OSUtils::now();
@@ -634,6 +739,16 @@ void EmbeddedNetworkController::request(uint64_t nwid, const InetAddress& fromAd
 			return;
 		}
 		ms.lastRequestTime = now;
+	}
+	else {
+		// Controller-initiated re-request (push). These fan out to every online member
+		// on a network change, so cap the backlog and drop on overflow rather than
+		// growing the queue without bound — the member will still pick up the change on
+		// its next periodic poll. Member-initiated requests (requestPacketId != 0) are
+		// always queued; they're already rate-limited per member above.
+		if (_queue.size() >= ZT_CONTROLLER_MAX_QUEUED_REREQUESTS) {
+			return;
+		}
 	}
 
 	_RQEntry* qe = new _RQEntry;
@@ -670,7 +785,9 @@ std::string EmbeddedNetworkController::networkUpdateFromPostData(uint64_t networ
 	if (b.count("multicastLimit"))
 		network["multicastLimit"] = OSUtils::jsonInt(b["multicastLimit"], 32ULL);
 	if (b.count("mtu"))
-		network["mtu"] = std::max(std::min((unsigned int)OSUtils::jsonInt(b["mtu"], ZT_DEFAULT_MTU), (unsigned int)ZT_MAX_MTU), (unsigned int)ZT_MIN_MTU);
+		network["mtu"] = std::max(
+			std::min((unsigned int)OSUtils::jsonInt(b["mtu"], ZT_DEFAULT_MTU), (unsigned int)ZT_MAX_MTU),
+			(unsigned int)ZT_MIN_MTU);
 
 	if (b.count("remoteTraceTarget")) {
 		const std::string rtt(OSUtils::jsonString(b["remoteTraceTarget"], ""));
@@ -743,7 +860,9 @@ std::string EmbeddedNetworkController::networkUpdateFromPostData(uint64_t networ
 			for (unsigned long i = 0; i < relays.size(); ++i) {
 				json& relay = relays[i];
 				if (relay.is_string()) {
-					nrelays.push_back(Address(Utils::hexStrToU64(OSUtils::jsonString(relay, "0").c_str()) & 0xffffffffffULL).toString(rtmp));
+					nrelays.push_back(
+						Address(Utils::hexStrToU64(OSUtils::jsonString(relay, "0").c_str()) & 0xffffffffffULL)
+							.toString(rtmp));
 				}
 			}
 		}
@@ -945,7 +1064,10 @@ std::string EmbeddedNetworkController::networkUpdateFromPostData(uint64_t networ
 	return network.dump();
 }
 
-void EmbeddedNetworkController::configureHTTPControlPlane(httplib::Server& s, httplib::Server& sv6, const std::function<void(const httplib::Request&, httplib::Response&, std::string)> setContent)
+void EmbeddedNetworkController::configureHTTPControlPlane(
+	httplib::Server& s,
+	httplib::Server& sv6,
+	const std::function<void(const httplib::Request&, httplib::Response&, std::string)> setContent)
 {
 	// Control plane Endpoints
 	std::string controllerPath = "/controller";
@@ -966,12 +1088,9 @@ void EmbeddedNetworkController::configureHTTPControlPlane(httplib::Server& s, ht
 		char tmp[4096];
 		const bool dbOk = _db.isReady();
 		OSUtils::ztsnprintf(
-			tmp,
-			sizeof(tmp),
+			tmp, sizeof(tmp),
 			"{\n\t\"controller\": true,\n\t\"apiVersion\": %d,\n\t\"clock\": %llu,\n\t\"databaseReady\": %s\n}\n",
-			ZT_NETCONF_CONTROLLER_API_VERSION,
-			(unsigned long long)OSUtils::now(),
-			dbOk ? "true" : "false");
+			ZT_NETCONF_CONTROLLER_API_VERSION, (unsigned long long)OSUtils::now(), dbOk ? "true" : "false");
 
 		if (! dbOk) {
 			res.status = 503;
@@ -1361,7 +1480,8 @@ void EmbeddedNetworkController::configureHTTPControlPlane(httplib::Server& s, ht
 				for (unsigned long i = 0; i < tags.size(); ++i) {
 					json& tag = tags[i];
 					if ((tag.is_array()) && (tag.size() == 2))
-						mtags[OSUtils::jsonInt(tag[0], 0ULL) & 0xffffffffULL] = OSUtils::jsonInt(tag[1], 0ULL) & 0xffffffffULL;
+						mtags[OSUtils::jsonInt(tag[0], 0ULL) & 0xffffffffULL] =
+							OSUtils::jsonInt(tag[1], 0ULL) & 0xffffffffULL;
 				}
 				json mtagsa = json::array();
 				for (std::map<uint64_t, uint64_t>::iterator t(mtags.begin()); t != mtags.end(); ++t) {
@@ -1491,7 +1611,9 @@ void EmbeddedNetworkController::handleRemoteTrace(const ZT_RemoteTrace& rt)
 		}
 
 		const int64_t now = OSUtils::now();
-		OSUtils::ztsnprintf(id, sizeof(id), "%.10llx-%.16llx-%.10llx-%.4x", _signingId.address().toInt(), now, rt.origin, (unsigned int)(idCounter++ & 0xffff));
+		OSUtils::ztsnprintf(
+			id, sizeof(id), "%.10llx-%.16llx-%.10llx-%.4x", _signingId.address().toInt(), now, rt.origin,
+			(unsigned int)(idCounter++ & 0xffff));
 		d["id"] = id;
 		d["objtype"] = "trace";
 		d["ts"] = now;
@@ -1519,7 +1641,11 @@ void EmbeddedNetworkController::onNetworkUpdate(const void* db, uint64_t network
 	}
 }
 
-void EmbeddedNetworkController::onNetworkMemberUpdate(const void* db, uint64_t networkId, uint64_t memberId, const nlohmann::json& member)
+void EmbeddedNetworkController::onNetworkMemberUpdate(
+	const void* db,
+	uint64_t networkId,
+	uint64_t memberId,
+	const nlohmann::json& member)
 {
 	auto provider = opentelemetry::trace::Provider::GetTracerProvider();
 	auto tracer = provider->GetTracer("embedded_controller");
@@ -1545,18 +1671,27 @@ void EmbeddedNetworkController::onNetworkMemberDeauthorize(const void* db, uint6
 	auto scope = tracer->WithActiveSpan(span);
 
 	const int64_t now = OSUtils::now();
-	Revocation rev((uint32_t)_node->prng(), networkId, 0, now, ZT_REVOCATION_FLAG_FAST_PROPAGATE, Address(memberId), Revocation::CREDENTIAL_TYPE_COM);
+	Revocation rev(
+		(uint32_t)_node->prng(), networkId, 0, now, ZT_REVOCATION_FLAG_FAST_PROPAGATE, Address(memberId),
+		Revocation::CREDENTIAL_TYPE_COM);
 	rev.sign(_signingId);
 	{
 		std::lock_guard<std::mutex> l(_memberStatus_l);
 		for (auto i = _memberStatus.begin(); i != _memberStatus.end(); ++i) {
-			if ((i->first.networkId == networkId) && (i->second.online(now)))
+			if ((i->first.networkId == networkId) && (i->second.online(now))) {
 				_node->ncSendRevocation(Address(i->first.nodeId), rev);
+				// fprintf(stderr, "  Sent revocation to %.10llx\n", i->first.nodeId);
+			}
 		}
 	}
 }
 
-void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromAddr, uint64_t requestPacketId, const Identity& identity, const Dictionary<ZT_NETWORKCONFIG_METADATA_DICT_CAPACITY>& metaData)
+void EmbeddedNetworkController::_request(
+	uint64_t nwid,
+	const InetAddress& fromAddr,
+	uint64_t requestPacketId,
+	const Identity& identity,
+	const Dictionary<ZT_NETWORKCONFIG_METADATA_DICT_CAPACITY>& metaData)
 {
 	auto provider = opentelemetry::trace::Provider::GetTracerProvider();
 	auto tracer = provider->GetTracer("embedded_controller");
@@ -1579,9 +1714,17 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 	DB::NetworkSummaryInfo ns;
 	json network, member;
 
-	if (((! _signingId) || (! _signingId.hasPrivate())) || (_signingId.address().toInt() != (nwid >> 24)) || (! _sender)) {
+	if (((! _signingId) || (! _signingId.hasPrivate())) || (_signingId.address().toInt() != (nwid >> 24))
+		|| (! _sender)) {
 		return;
 	}
+
+	// Serialize the read-modify-write of this member's record so two concurrent
+	// requests for the same member (e.g. a member-initiated request racing a
+	// controller-initiated re-request on a different worker thread) can't clobber each
+	// other's authorization / IP-assignment changes. Per-member, so unrelated members
+	// don't contend.
+	std::lock_guard<std::mutex> memberLock(_memberLock(nwid, identity.address().toInt()));
 
 	const int64_t now = OSUtils::now();
 
@@ -1608,7 +1751,8 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 	Utils::hex(nwid, nwids);
 	_db.get(nwid, network, identity.address().toInt(), member, ns);
 	if ((! network.is_object()) || (network.empty())) {
-		_sender->ncSendError(nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_OBJECT_NOT_FOUND, nullptr, 0);
+		_sender->ncSendError(
+			nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_OBJECT_NOT_FOUND, nullptr, 0);
 #ifdef CENTRAL_CONTROLLER_REQUEST_BENCHMARK
 		b3.stop();
 #endif
@@ -1635,7 +1779,9 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 			// known member.
 			try {
 				if (Identity(haveIdStr.c_str()) != identity) {
-					_sender->ncSendError(nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_ACCESS_DENIED, nullptr, 0);
+					_sender->ncSendError(
+						nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_ACCESS_DENIED, nullptr,
+						0);
 #ifdef CENTRAL_CONTROLLER_REQUEST_BENCHMARK
 					b4.stop();
 #endif
@@ -1643,7 +1789,8 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 				}
 			}
 			catch (...) {
-				_sender->ncSendError(nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_ACCESS_DENIED, nullptr, 0);
+				_sender->ncSendError(
+					nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_ACCESS_DENIED, nullptr, 0);
 #ifdef CENTRAL_CONTROLLER_REQUEST_BENCHMARK
 				b4.stop();
 #endif
@@ -1734,13 +1881,23 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 	if (networkSSOEnabled && ! memberSSOExempt) {
 		authenticationExpiryTime = (int64_t)OSUtils::jsonInt(member["authenticationExpiryTime"], 0);
 		info = _db.getSSOAuthInfo(member, _ssoRedirectURL);
-		assert(info.enabled == networkSSOEnabled);
+		if (info.enabled != networkSSOEnabled) {
+			// The network requests SSO but the controller produced no SSO auth info
+			// (controller SSO globally disabled, or a transient DB anomaly). Fail closed
+			// — the member is treated as needing authentication — rather than asserting
+			// and taking down the entire controller process.
+			ZTC_LOG("WARNING: network %.16llx has SSO enabled but no SSO auth info was returned; treating member as "
+					"unauthorized\n",
+					(unsigned long long)nwid);
+		}
 		if (authenticationExpiryTime <= now) {
 			if (info.version == 0) {
 				Dictionary<4096> authInfo;
 				authInfo.add(ZT_AUTHINFO_DICT_KEY_VERSION, (uint64_t)0ULL);
 				authInfo.add(ZT_AUTHINFO_DICT_KEY_AUTHENTICATION_URL, info.authenticationURL.c_str());
-				_sender->ncSendError(nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_AUTHENTICATION_REQUIRED, authInfo.data(), authInfo.sizeBytes());
+				_sender->ncSendError(
+					nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_AUTHENTICATION_REQUIRED,
+					authInfo.data(), authInfo.sizeBytes());
 			}
 			else if (info.version == 1) {
 				Dictionary<8192> authInfo;
@@ -1751,7 +1908,9 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 				authInfo.add(ZT_AUTHINFO_DICT_KEY_STATE, info.ssoState.c_str());
 				authInfo.add(ZT_AUTHINFO_DICT_KEY_CLIENT_ID, info.ssoClientID.c_str());
 				authInfo.add(ZT_AUTHINFO_DICT_KEY_SSO_PROVIDER, info.ssoProvider.c_str());
-				_sender->ncSendError(nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_AUTHENTICATION_REQUIRED, authInfo.data(), authInfo.sizeBytes());
+				_sender->ncSendError(
+					nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_AUTHENTICATION_REQUIRED,
+					authInfo.data(), authInfo.sizeBytes());
 			}
 			DB::cleanMember(member);
 			_db.save(member, true);
@@ -1804,7 +1963,8 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 		// If they are not authorized, STOP!
 		DB::cleanMember(member);
 		_db.save(member, true);
-		_sender->ncSendError(nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_ACCESS_DENIED, nullptr, 0);
+		_sender->ncSendError(
+			nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_ACCESS_DENIED, nullptr, 0);
 #ifdef CENTRAL_CONTROLLER_REQUEST_BENCHMARK
 		b7.stop();
 #endif
@@ -1830,7 +1990,9 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 	if (network.contains("certificateTimeoutWindowSize")) {
 		credentialtmd = (int64_t)network["certificateTimeoutWindowSize"];
 	}
-	credentialtmd = std::max(std::min(credentialtmd, ZT_NETWORKCONFIG_DEFAULT_CREDENTIAL_TIME_MAX_MAX_DELTA), ZT_NETWORKCONFIG_DEFAULT_CREDENTIAL_TIME_MIN_MAX_DELTA);
+	credentialtmd = std::max(
+		std::min(credentialtmd, ZT_NETWORKCONFIG_DEFAULT_CREDENTIAL_TIME_MAX_MAX_DELTA),
+		ZT_NETWORKCONFIG_DEFAULT_CREDENTIAL_TIME_MIN_MAX_DELTA);
 
 	std::unique_ptr<NetworkConfig> nc(new NetworkConfig());
 
@@ -1843,7 +2005,9 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 	if (OSUtils::jsonBool(network["enableBroadcast"], true))
 		nc->flags |= ZT_NETWORKCONFIG_FLAG_ENABLE_BROADCAST;
 	Utils::scopy(nc->name, sizeof(nc->name), OSUtils::jsonString(network["name"], "").c_str());
-	nc->mtu = std::max(std::min((unsigned int)OSUtils::jsonInt(network["mtu"], ZT_DEFAULT_MTU), (unsigned int)ZT_MAX_MTU), (unsigned int)ZT_MIN_MTU);
+	nc->mtu = std::max(
+		std::min((unsigned int)OSUtils::jsonInt(network["mtu"], ZT_DEFAULT_MTU), (unsigned int)ZT_MAX_MTU),
+		(unsigned int)ZT_MIN_MTU);
 	nc->multicastLimit = (unsigned int)OSUtils::jsonInt(network["multicastLimit"], 32ULL);
 
 	nc->ssoEnabled = networkSSOEnabled;	  // OSUtils::jsonBool(network["ssoEnabled"], false);
@@ -1865,7 +2029,7 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 		}
 		if (! info.issuerURL.empty()) {
 #ifdef ZT_DEBUG
-			fprintf(stderr, "copying issuerURL to nc: %s\n", info.issuerURL.c_str());
+			ZTC_LOG("copying issuerURL to nc: %s\n", info.issuerURL.c_str());
 #endif
 			Utils::scopy(nc->issuerURL, sizeof(nc->issuerURL), info.issuerURL.c_str());
 		}
@@ -1912,7 +2076,8 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 	json& memberTags = member["tags"];
 	json& dns = network["dns"];
 
-	// fprintf(stderr, "IP Assignment Pools for Network %s: %s\n", nwids, OSUtils::jsonDump(ipAssignmentPools, 2).c_str());
+	// fprintf(stderr, "IP Assignment Pools for Network %s: %s\n", nwids, OSUtils::jsonDump(ipAssignmentPools,
+	// 2).c_str());
 
 	if (metaData.getUI(ZT_NETWORKCONFIG_REQUEST_METADATA_KEY_RULES_ENGINE_REV, 0) <= 0) {
 		// Old versions with no rules engine support get an allow everything rule.
@@ -1985,7 +2150,8 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 			for (unsigned long i = 0; i < memberTags.size(); ++i) {
 				json& t = memberTags[i];
 				if ((t.is_array()) && (t.size() == 2))
-					memberTagsById[(uint32_t)(OSUtils::jsonInt(t[0], 0ULL) & 0xffffffffULL)] = (uint32_t)(OSUtils::jsonInt(t[1], 0ULL) & 0xffffffffULL);
+					memberTagsById[(uint32_t)(OSUtils::jsonInt(t[0], 0ULL) & 0xffffffffULL)] =
+						(uint32_t)(OSUtils::jsonInt(t[1], 0ULL) & 0xffffffffULL);
 			}
 		}
 		if (tags.is_array()) {	 // check network tags array for defaults that are not present in member tags
@@ -2070,7 +2236,8 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 				int routedNetmaskBits = -1;
 				for (unsigned int rk = 0; rk < nc->routeCount; ++rk) {
 					if (reinterpret_cast<const InetAddress*>(&(nc->routes[rk].target))->containsAddress(ip)) {
-						const int nb = (int)(reinterpret_cast<const InetAddress*>(&(nc->routes[rk].target))->netmaskBits());
+						const int nb =
+							(int)(reinterpret_cast<const InetAddress*>(&(nc->routes[rk].target))->netmaskBits());
 						if (nb > routedNetmaskBits)
 							routedNetmaskBits = nb;
 					}
@@ -2093,7 +2260,8 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 		ipAssignments = json::array();
 	}
 
-	if ((ipAssignmentPools.is_array()) && ((v6AssignMode.is_object()) && (OSUtils::jsonBool(v6AssignMode["zt"], false))) && (! haveManagedIpv6AutoAssignment) && (! noAutoAssignIps)) {
+	if ((ipAssignmentPools.is_array()) && ((v6AssignMode.is_object()) && (OSUtils::jsonBool(v6AssignMode["zt"], false)))
+		&& (! haveManagedIpv6AutoAssignment) && (! noAutoAssignIps)) {
 		for (unsigned long p = 0; ((p < ipAssignmentPools.size()) && (! haveManagedIpv6AutoAssignment)); ++p) {
 			json& pool = ipAssignmentPools[p];
 			if (pool.is_object()) {
@@ -2117,7 +2285,8 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 							xx[1] = Utils::hton(x[1] + identity.address().toInt());
 						}
 						else {
-							// Otherwise pick random addresses -- this technically doesn't explore the whole range if the lower 64 bit range is >= 1 but that won't matter since that would be huge anyway
+							// Otherwise pick random addresses -- this technically doesn't explore the whole range if
+							// the lower 64 bit range is >= 1 but that won't matter since that would be huge anyway
 							Utils::getSecureRandom((void*)xx, 16);
 							if ((e[0] > s[0]))
 								xx[0] %= (e[0] - s[0]);
@@ -2136,12 +2305,16 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 						// Check if this IP is within a local-to-Ethernet routed network
 						int routedNetmaskBits = 0;
 						for (unsigned int rk = 0; rk < nc->routeCount; ++rk) {
-							if ((! nc->routes[rk].via.ss_family) && (nc->routes[rk].target.ss_family == AF_INET6) && (reinterpret_cast<const InetAddress*>(&(nc->routes[rk].target))->containsAddress(ip6)))
-								routedNetmaskBits = reinterpret_cast<const InetAddress*>(&(nc->routes[rk].target))->netmaskBits();
+							if ((! nc->routes[rk].via.ss_family) && (nc->routes[rk].target.ss_family == AF_INET6)
+								&& (reinterpret_cast<const InetAddress*>(&(nc->routes[rk].target))
+										->containsAddress(ip6)))
+								routedNetmaskBits =
+									reinterpret_cast<const InetAddress*>(&(nc->routes[rk].target))->netmaskBits();
 						}
 
 						// If it's routed, then try to claim and assign it and if successful end loop
-						if ((routedNetmaskBits > 0) && (! std::binary_search(ns.allocatedIps.begin(), ns.allocatedIps.end(), ip6))) {
+						if ((routedNetmaskBits > 0)
+							&& (! std::binary_search(ns.allocatedIps.begin(), ns.allocatedIps.end(), ip6))) {
 							char tmpip[64];
 							const std::string ipStr(ip6.toIpString(tmpip));
 							if (std::find(ipAssignments.begin(), ipAssignments.end(), ipStr) == ipAssignments.end()) {
@@ -2160,24 +2333,30 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 		}
 	}
 
-	if ((ipAssignmentPools.is_array()) && ((v4AssignMode.is_object()) && (OSUtils::jsonBool(v4AssignMode["zt"], false))) && (! haveManagedIpv4AutoAssignment) && (! noAutoAssignIps)) {
+	if ((ipAssignmentPools.is_array()) && ((v4AssignMode.is_object()) && (OSUtils::jsonBool(v4AssignMode["zt"], false)))
+		&& (! haveManagedIpv4AutoAssignment) && (! noAutoAssignIps)) {
 		for (unsigned long p = 0; ((p < ipAssignmentPools.size()) && (! haveManagedIpv4AutoAssignment)); ++p) {
 			json& pool = ipAssignmentPools[p];
 			if (pool.is_object()) {
 				InetAddress ipRangeStartIA(OSUtils::jsonString(pool["ipRangeStart"], "").c_str());
 				InetAddress ipRangeEndIA(OSUtils::jsonString(pool["ipRangeEnd"], "").c_str());
 				if ((ipRangeStartIA.ss_family == AF_INET) && (ipRangeEndIA.ss_family == AF_INET)) {
-					uint32_t ipRangeStart = Utils::ntoh((uint32_t)(reinterpret_cast<struct sockaddr_in*>(&ipRangeStartIA)->sin_addr.s_addr));
-					uint32_t ipRangeEnd = Utils::ntoh((uint32_t)(reinterpret_cast<struct sockaddr_in*>(&ipRangeEndIA)->sin_addr.s_addr));
+					uint32_t ipRangeStart = Utils::ntoh(
+						(uint32_t)(reinterpret_cast<struct sockaddr_in*>(&ipRangeStartIA)->sin_addr.s_addr));
+					uint32_t ipRangeEnd =
+						Utils::ntoh((uint32_t)(reinterpret_cast<struct sockaddr_in*>(&ipRangeEndIA)->sin_addr.s_addr));
 
-					if ((ipRangeEnd < ipRangeStart) || (ipRangeStart == 0))
+					if ((ipRangeEnd < ipRangeStart) || (ipRangeStart == 0)) {
+						ZTC_LOG("  bad ip range range\n");
 						continue;
+					}
 					uint32_t ipRangeLen = ipRangeEnd - ipRangeStart;
 
 					// Start with the LSB of the member's address
 					uint32_t ipTrialCounter = (uint32_t)(identity.address().toInt() & 0xffffffff);
 
-					for (uint32_t k = ipRangeStart, trialCount = 0; ((k <= ipRangeEnd) && (trialCount < 1000)); ++k, ++trialCount) {
+					for (uint32_t k = ipRangeStart, trialCount = 0; ((k <= ipRangeEnd) && (trialCount < 1000));
+						 ++k, ++trialCount) {
 						uint32_t ip = (ipRangeLen > 0) ? (ipRangeStart + (ipTrialCounter % ipRangeLen)) : ipRangeStart;
 						++ipTrialCounter;
 						if ((ip & 0x000000ff) == 0x000000ff) {
@@ -2188,8 +2367,12 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 						int routedNetmaskBits = -1;
 						for (unsigned int rk = 0; rk < nc->routeCount; ++rk) {
 							if (nc->routes[rk].target.ss_family == AF_INET) {
-								uint32_t targetIp = Utils::ntoh((uint32_t)(reinterpret_cast<const struct sockaddr_in*>(&(nc->routes[rk].target))->sin_addr.s_addr));
-								int targetBits = Utils::ntoh((uint16_t)(reinterpret_cast<const struct sockaddr_in*>(&(nc->routes[rk].target))->sin_port));
+								uint32_t targetIp = Utils::ntoh(
+									(uint32_t)(reinterpret_cast<const struct sockaddr_in*>(&(nc->routes[rk].target))
+												   ->sin_addr.s_addr));
+								int targetBits = Utils::ntoh(
+									(uint16_t)(reinterpret_cast<const struct sockaddr_in*>(&(nc->routes[rk].target))
+												   ->sin_port));
 								if ((ip & (0xffffffff << (32 - targetBits))) == targetIp) {
 									routedNetmaskBits = targetBits;
 									break;
@@ -2199,14 +2382,16 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 
 						// If it's routed, then try to claim and assign it and if successful end loop
 						const InetAddress ip4(Utils::hton(ip), 0);
-						if ((routedNetmaskBits > 0) && (! std::binary_search(ns.allocatedIps.begin(), ns.allocatedIps.end(), ip4))) {
+						if ((routedNetmaskBits > 0)
+							&& (! std::binary_search(ns.allocatedIps.begin(), ns.allocatedIps.end(), ip4))) {
 							char tmpip[64];
 							const std::string ipStr(ip4.toIpString(tmpip));
 							if (std::find(ipAssignments.begin(), ipAssignments.end(), ipStr) == ipAssignments.end()) {
 								ipAssignments.push_back(ipStr);
 								member["ipAssignments"] = ipAssignments;
 								if (nc->staticIpCount < ZT_MAX_ZT_ASSIGNED_ADDRESSES) {
-									struct sockaddr_in* const v4ip = reinterpret_cast<struct sockaddr_in*>(&(nc->staticIps[nc->staticIpCount++]));
+									struct sockaddr_in* const v4ip =
+										reinterpret_cast<struct sockaddr_in*>(&(nc->staticIps[nc->staticIpCount++]));
 									v4ip->sin_family = AF_INET;
 									v4ip->sin_port = Utils::hton((uint16_t)routedNetmaskBits);
 									v4ip->sin_addr.s_addr = Utils::hton(ip);
@@ -2223,7 +2408,7 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 
 	if (dns.is_object()) {
 		std::string domain = OSUtils::jsonString(dns["domain"], "");
-		memcpy(nc->dns.domain, domain.c_str(), domain.size());
+		Utils::scopy(nc->dns.domain, sizeof(nc->dns.domain), domain.c_str());
 		json& addrArray = dns["servers"];
 		if (addrArray.is_array()) {
 			for (unsigned int j = 0; j < addrArray.size() && j < ZT_MAX_DNS_SERVERS; ++j) {
@@ -2260,7 +2445,8 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 		nc->com = com;
 	}
 	else {
-		_sender->ncSendError(nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_INTERNAL_SERVER_ERROR, nullptr, 0);
+		_sender->ncSendError(
+			nwid, requestPacketId, identity.address(), NetworkController::NC_ERROR_INTERNAL_SERVER_ERROR, nullptr, 0);
 #ifdef CENTRAL_CONTROLLER_REQUEST_BENCHMARK
 		b9.stop();
 #endif
@@ -2274,6 +2460,7 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 	c10++;
 	b10.start();
 #endif
+	member["change_source"] = "controller";
 	DB::cleanMember(member);
 	_db.save(member, true);
 #ifdef CENTRAL_CONTROLLER_REQUEST_BENCHMARK
@@ -2284,7 +2471,9 @@ void EmbeddedNetworkController::_request(uint64_t nwid, const InetAddress& fromA
 	c11++;
 	b11.start();
 #endif
-	_sender->ncSendConfig(nwid, requestPacketId, identity.address(), *(nc.get()), metaData.getUI(ZT_NETWORKCONFIG_REQUEST_METADATA_KEY_VERSION, 0) < 6);
+	_sender->ncSendConfig(
+		nwid, requestPacketId, identity.address(), *(nc.get()),
+		metaData.getUI(ZT_NETWORKCONFIG_REQUEST_METADATA_KEY_VERSION, 0) < 6);
 #ifdef CENTRAL_CONTROLLER_REQUEST_BENCHMARK
 	b11.stop();
 #endif
@@ -2303,28 +2492,44 @@ void EmbeddedNetworkController::_startThreads()
 	}
 	const long hwc = std::max((long)std::thread::hardware_concurrency(), (long)1);
 	for (long t = 0; t < hwc; ++t) {
-		_threads.emplace_back([this]() {
+		_threads.emplace_back([this, t]() {
 			Metrics::network_config_request_threads++;
+			uint64_t processedCount = 0;
+			uint64_t idleIterations = 0;
 			for (;;) {
 				_RQEntry* qe = (_RQEntry*)0;
-				Metrics::network_config_request_queue_size = _queue.size();
+				auto queueSize = _queue.size();
+				Metrics::network_config_request_queue_size = queueSize;
 				auto timedWaitResult = _queue.get(qe, 1000);
 				if (timedWaitResult == BlockingQueue<_RQEntry*>::STOP) {
 					break;
 				}
 				else if (timedWaitResult == BlockingQueue<_RQEntry*>::OK) {
+					idleIterations = 0;
 					if (qe) {
 						try {
 							_request(qe->nwid, qe->fromAddr, qe->requestPacketId, qe->identity, qe->metaData);
+							processedCount++;
 						}
 						catch (std::exception& e) {
-							fprintf(stderr, "ERROR: exception in controller request handling thread: %s" ZT_EOL_S, e.what());
+							fprintf(
+								stderr, "ERROR: exception in controller request handling thread: %s" ZT_EOL_S,
+								e.what());
 						}
 						catch (...) {
-							fprintf(stderr, "ERROR: exception in controller request handling thread: unknown exception" ZT_EOL_S);
+							fprintf(
+								stderr,
+								"ERROR: exception in controller request handling thread: unknown exception" ZT_EOL_S);
 						}
 						delete qe;
 						qe = nullptr;
+					}
+				}
+				else {
+					// Periodic liveness log every ~30s (30 timeout iterations of 1000ms)
+					if (++idleIterations % 30 == 0) {
+						ZTC_LOG("request worker %ld: alive, queue_size=%lu, total_processed=%llu\n", t,
+								(unsigned long)queueSize, (unsigned long long)processedCount);
 					}
 				}
 			}
@@ -2354,7 +2559,8 @@ void EmbeddedNetworkController::_ssoExpiryThread()
 					network.clear();
 					member.clear();
 					if (_db.get(s->second.networkId, network, s->second.nodeId, member)) {
-						int64_t authenticationExpiryTime = (int64_t)OSUtils::jsonInt(member["authenticationExpiryTime"], 0);
+						int64_t authenticationExpiryTime =
+							(int64_t)OSUtils::jsonInt(member["authenticationExpiryTime"], 0);
 						if (authenticationExpiryTime <= now) {
 							expired.push_back(s->second);
 						}
